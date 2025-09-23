@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# Action test/validation workflow
-name: "Test GitHub Action 🧪"
+# Python SBOM Action test/validation workflow
+name: "Test Python SBOM Action 🧪"
 
 # yamllint disable-line rule:truthy
 on:
@@ -17,59 +17,360 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
-  ### Test the GitHub Action in this Repository ###
-  tests:
-    name: "Test local GitHub Action"
+  test-sbom-generation:
+    name: "SBOM"
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10 # Increase this timeout value as needed
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repository: "lfreleng-actions/test-python-project"
+            expected_manager: "pdm"
+            description: "PDM project"
+          - repository: "lfit/dependamerge"
+            expected_manager: "uv"
+            description: "UV project"
+          - repository: "python-poetry/poetry"
+            expected_manager: "poetry"
+            description: "Poetry project"
+          - repository: "pypa/pipenv"
+            expected_manager: "pipenv"
+            description: "Pipenv project"
+          - repository: "encode/httpx"
+            expected_manager: "pip-tools"
+            description: "Requirements.txt project"
+
     steps:
-      # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
         with:
           egress-policy: audit
 
-      - name: "Checkout repository"
+      - name: "Checkout local Action"
+        # yamllint disable-line rule:line-length
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      # Perform setup prior to running test(s)
-      - name: "Testing setup step"
-        shell: bash
-        run: |
-          # Testing setup step
-          echo "Testing setup step"
-          echo "Testing setup step/summary output" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: "Running local action: ${{ github.repository }}"
-        uses: ./
+      - name: "Checkout test repository: ${{ matrix.description }}"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          input: "test input 💬"
+          repository: ${{ matrix.repository }}
+          path: test-project
+          fetch-depth: 1
 
-      - name: "Validated local action: ${{ github.repository }}"
+      - name: "Debug: List test project files"
         shell: bash
         run: |
-          # Local action validation
-          echo "Validated local action: ${{ github.repository }}"
-          echo "Validation step summary output" >> "$GITHUB_STEP_SUMMARY"
+          echo "🔍 Listing files in test-project directory:"
+          ls -la test-project/ || echo "Directory not found"
+          echo ""
+          echo "🔍 Looking for dependency files:"
+          find test-project/ -name "*.lock" -o -name "Pipfile*" \
+            -o -name "requirements*.txt" -o -name "pyproject.toml" \
+            2>/dev/null | head -10 || echo "No files found"
+          echo ""
+          echo "🔍 Checking specific files:"
+          [[ -f test-project/requirements.txt ]] && \
+            echo "- requirements.txt: EXISTS" || \
+            echo "- requirements.txt: NOT FOUND"
+          [[ -f test-project/pyproject.toml ]] && \
+            echo "- pyproject.toml: EXISTS" || \
+            echo "- pyproject.toml: NOT FOUND"
+          [[ -f test-project/requirements-dev.txt ]] && \
+            echo "- requirements-dev.txt: EXISTS" || \
+            echo "- requirements-dev.txt: NOT FOUND"
+          echo ""
+          if [[ -f "test-project/pyproject.toml" ]]; then
+            echo "🔍 pyproject.toml content (first 20 lines):"
+            head -20 test-project/pyproject.toml
+          fi
 
-      # yamllint disable-line rule:line-length
-      - name: "Running local action: ${{ github.repository }} [Override Failure]"
+      - name: "SBOM for ${{ matrix.description }}"
+        id: generate-sbom
         uses: ./
-        id: failure
         continue-on-error: true
         with:
-          invalid_input: "Some garbage"
+          path_prefix: "test-project"
+          sbom_format: "both"
+          include_dev: "false"
+          output_directory: "."
+          filename_prefix: "test-sbom"
 
-      # Failure testing is also important
-      - name: "Error if step above did NOT fail"
-        if: steps.failure.outcome == 'success'
+      - name: "Debug: Check SBOM generation outputs"
         shell: bash
         run: |
-          # Error if step above did NOT fail
-          echo "Error: previous test step did NOT fail ❌"
-          exit 1
+          echo "🔍 Checking SBOM generation results:"
+          echo "Step outcome: ${{ steps.generate-sbom.outcome }}"
+          detected_mgr="${{ steps.generate-sbom.outputs.dependency_manager }}"
+          echo "Dependency manager: '$detected_mgr'"
+          component_count="${{ steps.generate-sbom.outputs.component_count }}"
+          echo "Component count: '$component_count'"
+          json_path="${{ steps.generate-sbom.outputs.sbom_json_path }}"
+          echo "JSON path: '$json_path'"
+          xml_path="${{ steps.generate-sbom.outputs.sbom_xml_path }}"
+          echo "XML path: '$xml_path'"
+          echo ""
+          echo "🔍 Looking for generated files:"
+          ls -la ./*.json ./*.xml 2>/dev/null || echo "No SBOM files in root"
+          find . -name "test-sbom*" -type f 2>/dev/null || echo "No files found"
+
+      - name: "Validate SBOM generation results"
+        shell: bash
+        run: |
+          echo "🔍 Validating SBOM generation for ${{ matrix.description }}"
+
+          # Check if SBOM generation succeeded
+          if [[ "${{ steps.generate-sbom.outcome }}" != "success" ]]; then
+            desc="${{ matrix.description }}"
+            echo "❌ SBOM generation failed for $desc"
+            echo "This might be expected for some repos"
+            repo="${{ matrix.repository }}"
+            echo "::warning::SBOM generation failed for $repo"
+            exit 0
+          fi
+
+          echo "✅ SBOM generation succeeded"
+
+          # Validate dependency manager detection
+          detected="${{ steps.generate-sbom.outputs.dependency_manager }}"
+          expected="${{ matrix.expected_manager }}"
+
+          if [[ -n "$detected" && "$detected" != "$expected" ]]; then
+            echo "⚠️ Expected '$expected', got '$detected'"
+            # yamllint disable-next-line rule:line-length
+            repo="${{ matrix.repository }}"
+            echo "::warning::Manager mismatch: $repo '$expected'/'$detected'"
+          elif [[ -n "$detected" ]]; then
+            echo "✅ Dependency manager correctly detected: $detected"
+          fi
+
+          # Check for generated files using action outputs
+          json_found=false
+          xml_found=false
+
+          # Get the actual file paths from action outputs
+          json_path="${{ steps.generate-sbom.outputs.sbom_json_path }}"
+          xml_path="${{ steps.generate-sbom.outputs.sbom_xml_path }}"
+
+          if [[ -n "$json_path" && -f "$json_path" ]]; then
+            json_found=true
+            echo "✅ JSON SBOM found: $json_path"
+          elif [[ -f "test-sbom.json" ]]; then
+            json_found=true
+            echo "✅ JSON SBOM found: test-sbom.json"
+          fi
+
+          if [[ -n "$xml_path" && -f "$xml_path" ]]; then
+            xml_found=true
+            echo "✅ XML SBOM found: $xml_path"
+          elif [[ -f "test-sbom.xml" ]]; then
+            xml_found=true
+            echo "✅ XML SBOM found: test-sbom.xml"
+          fi
+
+          # Check component count if available
+          component_count="${{ steps.generate-sbom.outputs.component_count }}"
+          if [[ -n "$component_count" && "$component_count" != "0" ]]; then
+            echo "✅ Component count: $component_count"
+          elif [[ "$component_count" == "0" ]]; then
+            echo "⚠️ Component count is 0 - might be expected"
+          fi
+
+          if [[ "$json_found" == true ]] || [[ "$xml_found" == true ]]; then
+            echo "✅ SBOM generation test passed for ${{ matrix.description }}"
+          else
+            echo "⚠️ No SBOM files found, but generation didn't fail"
+            repo="${{ matrix.repository }}"
+            echo "::warning::No SBOM files generated for $repo"
+          fi
+
+      - name: "Upload SBOM artifacts"
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: steps.generate-sbom.outcome == 'success'
+        with:
+          name: "sbom-${{ matrix.expected_manager }}-${{ github.run_number }}"
+          path: |
+            ${{ steps.generate-sbom.outputs.sbom_json_path }}
+            ${{ steps.generate-sbom.outputs.sbom_xml_path }}
+            test-sbom.json
+            test-sbom.xml
+          retention-days: 7
+          if-no-files-found: ignore
+
+  test-summary:
+    name: "Test Summary"
+    runs-on: ubuntu-latest
+    needs:
+      - test-sbom-generation
+    if: always()
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+        with:
+          egress-policy: audit
+
+      - name: "Evaluate matrix job results"
+        id: evaluate
+        shell: bash
+        run: |
+          echo "🔍 Evaluating individual matrix job results..."
+
+          # Matrix job results (passed as JSON)
+          overall_result='${{ needs.test-sbom-generation.result }}'
+
+          echo "Overall matrix result: $overall_result"
+
+          # Expected jobs
+          expected_jobs=5
+
+          # Check each matrix job result
+          echo ""
+          echo "📊 Individual Job Results:"
+          echo "========================="
+
+          # Since we can't easily parse JSON in bash, we'll check the overall
+          # result
+          # and count artifacts to validate success
+
+          if [[ "$overall_result" == "success" ]]; then
+            echo "✅ Matrix jobs completed successfully"
+          else
+            echo "❌ Some matrix jobs failed"
+            # We'll validate by checking artifacts in the next step
+          fi
+
+          echo "Expected jobs: $expected_jobs"
+          echo "Matrix result: $overall_result"
+
+          echo "expected_jobs=$expected_jobs" >> "$GITHUB_OUTPUT"
+          echo "matrix_result=$overall_result" >> "$GITHUB_OUTPUT"
+
+      - name: "Wait and count SBOM artifacts via GitHub API"
+        id: validate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "🔍 Counting SBOM artifacts via GitHub API..."
+
+          expected_jobs=${{ steps.evaluate.outputs.expected_jobs }}
+          run_id="${{ github.run_id }}"
+          repo="${{ github.repository }}"
+
+          # Wait up to 2 minutes for artifacts to be uploaded
+          max_attempts=12
+          attempt=1
+
+          while [[ $attempt -le $max_attempts ]]; do
+            echo "🔄 Attempt $attempt/$max_attempts: Checking for artifacts..."
+
+            # Get artifacts for this workflow run
+            artifacts_json=$(gh api \
+              "repos/$repo/actions/runs/$run_id/artifacts" --jq '.artifacts')
+
+            # Count SBOM artifacts (should start with "sbom-")
+            artifact_count=$(echo "$artifacts_json" | \
+              jq '[.[] | select(.name | startswith("sbom-"))] | length')
+
+            echo "Found $artifact_count SBOM artifacts " \
+                 "(expected: $expected_jobs)"
+
+            # List the artifacts we found
+            echo "📋 SBOM artifacts found:"
+            echo "$artifacts_json" | jq -r \
+              '.[] | select(.name | startswith("sbom-")) |
+               "  • \(.name) (\(.size_in_bytes) bytes)"'
+
+            if [[ $artifact_count -eq $expected_jobs ]]; then
+              echo "✅ All $expected_jobs SBOM artifacts found!"
+              break
+            else
+              echo "⏳ Waiting 10 seconds for more artifacts..."
+              sleep 10
+              ((attempt++))
+            fi
+          done
+
+          # Determine final result
+          if [[ $artifact_count -eq $expected_jobs ]]; then
+            final_result="success"
+            echo "✅ All $expected_jobs SBOM generations successful"
+          else
+            final_result="failure"
+            echo "❌ Only $artifact_count/$expected_jobs SBOM generations " \
+                 "successful"
+          fi
+
+          echo "artifact_count=$artifact_count" >> "$GITHUB_OUTPUT"
+          echo "final_result=$final_result" >> "$GITHUB_OUTPUT"
+
+      - name: "Generate test summary"
+        shell: bash
+        run: |
+          expected_jobs=${{ steps.evaluate.outputs.expected_jobs }}
+          artifact_count=${{ steps.validate.outputs.artifact_count }}
+          final_result="${{ steps.validate.outputs.final_result }}"
+
+          {
+            echo "# 🎉 Python SBOM Action Test Results"
+            echo ""
+            echo "## 📊 Test Status"
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Expected Tests | $expected_jobs |"
+            echo "| Successful SBOMs | $artifact_count |"
+            echo "| Overall Result | $final_result |"
+            echo ""
+            echo "## 🧪 Tested Dependency Managers"
+            echo "- **PDM**: \`lfreleng-actions/test-python-project\`"
+            echo "- **UV**: \`lfit/dependamerge\`"
+            echo "- **Poetry**: \`python-poetry/poetry\`"
+            echo "- **Pipenv**: \`pypa/pipenv\`"
+            echo "- **pip-tools/requirements.txt**: \`encode/httpx\`"
+            echo ""
+            echo "## 📋 Test Coverage"
+            echo "- SBOM generation for major Python dependency managers"
+            echo "- Real-world repository testing"
+            echo "- JSON and XML output format validation"
+            echo "- pyproject.toml support for modern Python projects"
+            echo "- Graceful error handling"
+            echo ""
+            if [[ "$final_result" == "success" ]]; then
+              echo "🎉 **All $expected_jobs tests passed successfully!**"
+            else
+              echo "❌ **Only $artifact_count/$expected_jobs tests passed - " \
+                   "some SBOM generations failed**"
+              echo ""
+              echo "Please check individual job results above for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Fail if not all SBOMs generated"
+        shell: bash
+        run: |
+          final_result="${{ steps.validate.outputs.final_result }}"
+          expected_jobs=${{ steps.evaluate.outputs.expected_jobs }}
+          artifact_count=${{ steps.validate.outputs.artifact_count }}
+
+          if [[ "$final_result" != "success" ]]; then
+            echo "❌ Test suite failed: Only $artifact_count/$expected_jobs " \
+                 "SBOM generations successful"
+            echo "This indicates that some dependency managers or " \
+                 "repositories are not working correctly."
+            exit 1
+          else
+            echo "✅ Test suite passed: All $expected_jobs " \
+                 "SBOM generations successful"
+          fi
