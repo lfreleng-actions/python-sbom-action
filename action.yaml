@@ -2,36 +2,578 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# actions-template
-name: "🛠️ Actions Template"
-description: "Description of action"
-# Any relevant notes/observations can go here
+name: "Python SBOM Generator"
+description: "Generates CycloneDX SBOM reports for Python projects"
+
+branding:
+  icon: "package"
+  color: "blue"
 
 inputs:
-  input:
-    description: "Description of input"
-    required: true
+  python_version:
+    description: "Python version to use for SBOM generation"
+    required: false
+    default: "3.12"
+  include_dev:
+    description: "Include development dependencies in SBOM"
+    required: false
+    default: "false"
+  sbom_format:
+    description: "SBOM output format: 'json', 'xml', or 'both'"
+    required: false
+    default: "both"
+  sbom_spec_version:
+    description: "CycloneDX specification version to use"
+    required: false
+    default: "1.5"
+  filename_prefix:
+    description: "Base filename for SBOM output (without extension)"
+    required: false
+    default: "sbom-cyclonedx"
+
+  output_directory:
+    description: "Directory where SBOM reports will be written"
+    required: false
+    default: "."
+
+  path_prefix:
+    description: "Directory location containing project code"
+    required: false
+    default: "."
+
+  fail_on_error:
+    description: "Fail the action if SBOM generation encounters errors"
+    required: false
+    default: "true"
 
 outputs:
-  output:
-    description: "Description of output"
-    value: ${{ steps.code.outputs.output }}
+  sbom_json_path:
+    description: "Path to generated JSON SBOM file"
+    value: ${{ steps.generate_sbom.outputs.sbom_json_path }}
+
+  sbom_xml_path:
+    description: "Path to generated XML SBOM file"
+    value: ${{ steps.generate_sbom.outputs.sbom_xml_path }}
+
+  dependency_manager:
+    description: "Detected Python dependency manager"
+    value: ${{ steps.detect_tool.outputs.dependency_manager }}
+
+  component_count:
+    description: "Number of components in the generated SBOM"
+    value: ${{ steps.generate_sbom.outputs.component_count }}
 
 runs:
   using: "composite"
   steps:
-    - name: "Friendly Name"
-      id: code
+    - name: "Validate and set project directory"
+      id: project_dir
       shell: bash
       run: |
-        # Friendly Name
-        input="${{ inputs.input }}"
-        if [ -z "$input" ]; then
-          echo "Error: mandatory input was not set/configured ❌"
+        set -euo pipefail
+
+        # Determine project directory (where source code is located)
+        if [[ -n "${{ inputs.path_prefix }}" && \
+          "${{ inputs.path_prefix }}" != "." ]]; then
+          PROJECT_DIR="${{ inputs.path_prefix }}"
+          echo "Using path_prefix: $PROJECT_DIR"
+        else
+          PROJECT_DIR="."
+          echo "Using default project directory: $PROJECT_DIR"
+        fi
+
+        # Determine output directory (where SBOM reports will be written)
+        # Convert to absolute path to avoid working directory issues
+        if [[ "${{ inputs.output_directory }}" = "." ]]; then
+          OUTPUT_DIR="$(pwd)"
+        else
+          OUTPUT_DIR="$(realpath "${{ inputs.output_directory }}")"
+        fi
+        echo "SBOM reports will be written to: $OUTPUT_DIR"
+
+        # Verify project directory is valid
+        if [[ ! -d "$PROJECT_DIR" ]]; then
+          echo "❌ Error: Invalid project directory: $PROJECT_DIR"
           exit 1
         fi
 
-        echo "output=$input" >> "$GITHUB_ENV"
-        echo "output=$input" >> "$GITHUB_OUTPUT"
-        echo "Action received: $input ✅"
-        echo "Action received: $input ✅" >> "$GITHUB_STEP_SUMMARY"
+        # Create output directory if it doesn't exist
+        mkdir -p "$OUTPUT_DIR"
+
+        echo "✅ Validated project directory: $PROJECT_DIR"
+        echo "✅ Prepared output directory: $OUTPUT_DIR"
+        echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+        echo "output_dir=$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+
+    - name: "Detect Python dependency management tool"
+      id: detect_tool
+      shell: bash
+      working-directory: ${{ steps.project_dir.outputs.project_dir }}
+      run: |
+        set -euo pipefail
+
+        echo "🔍 Detecting Python dependency management tool..."
+
+        # Priority order for detection
+        DETECTED_TOOL=""
+        LOCK_FILE=""
+
+        # Check for uv (highest priority - modern and fast)
+        if [[ -f "uv.lock" ]]; then
+          DETECTED_TOOL="uv"
+          LOCK_FILE="uv.lock"
+          echo "✅ Detected uv with uv.lock"
+
+        # Check for PDM
+        elif [[ -f "pdm.lock" ]]; then
+          DETECTED_TOOL="pdm"
+          LOCK_FILE="pdm.lock"
+          echo "✅ Detected PDM with pdm.lock"
+
+        # Check for Poetry
+        elif [[ -f "poetry.lock" ]]; then
+          DETECTED_TOOL="poetry"
+          LOCK_FILE="poetry.lock"
+          echo "✅ Detected Poetry with poetry.lock"
+
+        # Check for Pipenv
+        elif [[ -f "Pipfile.lock" ]]; then
+          DETECTED_TOOL="pipenv"
+          LOCK_FILE="Pipfile.lock"
+          echo "✅ Detected Pipenv with Pipfile.lock"
+
+        # Check for pip-tools (requirements.txt with hashes or .in files)
+        elif [[ -f "requirements.txt" ]] && \
+             (grep -q "==" requirements.txt 2>/dev/null || \
+              [[ -f "requirements.in" ]]); then
+          DETECTED_TOOL="pip-tools"
+          LOCK_FILE="requirements.txt"
+          echo "✅ Detected pip-tools with requirements.txt"
+
+        # Fallback to plain requirements.txt
+        elif [[ -f "requirements.txt" ]]; then
+          DETECTED_TOOL="pip"
+          LOCK_FILE="requirements.txt"
+          echo "⚠️ Detected plain pip with requirements.txt"
+
+        # Check for pyproject.toml without lock files (standard packaging)
+        elif [[ -f "pyproject.toml" ]]; then
+          DETECTED_TOOL="pip"
+          LOCK_FILE="pyproject.toml"
+          echo "⚠️ Detected pyproject.toml without lock file, using pip"
+
+        else
+          echo "❌ No supported Python dependency files found"
+          echo "Supported files: uv.lock, pdm.lock, poetry.lock," \
+               "Pipfile.lock, requirements.txt, pyproject.toml"
+          if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+            exit 1
+          else
+            echo "::warning::No dependency files found," \
+                 "skipping SBOM generation"
+            exit 0
+          fi
+        fi
+
+        echo "dependency_manager=$DETECTED_TOOL" >> \
+             "$GITHUB_OUTPUT"
+        echo "lock_file=$LOCK_FILE" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "## 🔍 Dependency Manager Detection"
+          echo "**Detected Tool:** $DETECTED_TOOL"
+          echo "**Lock File:** $LOCK_FILE"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: "Setup Python"
+      # yamllint disable rule:line-length
+      uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: "Install and setup dependency management tool"
+      id: setup_tool
+      shell: bash
+      working-directory: ${{ steps.project_dir.outputs.project_dir }}
+      run: |
+        set -euo pipefail
+
+        TOOL="${{ steps.detect_tool.outputs.dependency_manager }}"
+        echo "🛠️ Setting up $TOOL..."
+
+        case "$TOOL" in
+          uv)
+            echo "Installing uv..."
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            uv --version
+            echo "tool_command=uv" >> "$GITHUB_OUTPUT"
+            ;;
+
+          pdm)
+            echo "Installing PDM..."
+            python -m pip install --upgrade pip
+            python -m pip install pdm
+            pdm --version
+            echo "tool_command=pdm" >> "$GITHUB_OUTPUT"
+            ;;
+
+          poetry)
+            echo "Installing Poetry..."
+            python -m pip install --upgrade pip
+            python -m pip install poetry
+            poetry --version
+            echo "tool_command=poetry" >> "$GITHUB_OUTPUT"
+            ;;
+
+          pipenv)
+            echo "Installing Pipenv..."
+            python -m pip install --upgrade pip
+            python -m pip install pipenv
+            pipenv --version
+            echo "tool_command=pipenv" >> "$GITHUB_OUTPUT"
+            ;;
+
+          pip-tools|pip)
+            echo "Using pip (already available)..."
+            python -m pip install --upgrade pip
+            pip --version
+            echo "tool_command=pip" >> "$GITHUB_OUTPUT"
+            ;;
+
+          *)
+            echo "❌ Unsupported tool: $TOOL"
+            exit 1
+            ;;
+        esac
+
+    - name: "Install dependencies"
+      id: install_deps
+      shell: bash
+      working-directory: ${{ steps.project_dir.outputs.project_dir }}
+      run: |
+        set -euo pipefail
+
+        TOOL="${{ steps.detect_tool.outputs.dependency_manager }}"
+        INCLUDE_DEV="${{ inputs.include_dev }}"
+
+        echo "📦 Installing dependencies with $TOOL..."
+
+        # Try to install dependencies, but don't fail if they have conflicts
+        case "$TOOL" in
+          uv)
+            if [[ "$INCLUDE_DEV" == "true" ]]; then
+              uv sync --locked || echo "⚠️ UV sync failed, continuing with available packages"
+            else
+              uv sync --locked --no-dev || echo "⚠️ UV sync failed, continuing with available packages"
+            fi
+            ;;
+
+          pdm)
+            if [[ "$INCLUDE_DEV" == "true" ]]; then
+              pdm sync --no-self || echo "⚠️ PDM sync failed, continuing with available packages"
+            else
+              pdm sync --prod --no-self || echo "⚠️ PDM sync failed, continuing with available packages"
+            fi
+            ;;
+
+          poetry)
+            if [[ "$INCLUDE_DEV" == "true" ]]; then
+              poetry install --no-root || echo "⚠️ Poetry install failed, continuing with available packages"
+            else
+              poetry install --no-root --only=main || echo "⚠️ Poetry install failed, continuing with available packages"
+            fi
+            ;;
+
+          pipenv)
+            if [[ "$INCLUDE_DEV" == "true" ]]; then
+              pipenv install --dev --deploy || pipenv install --dev --skip-lock || echo "⚠️ Pipenv install failed, continuing with available packages"
+            else
+              pipenv install --deploy || pipenv install --skip-lock || echo "⚠️ Pipenv install failed, continuing with available packages"
+            fi
+            ;;
+
+          pip-tools|pip)
+            # For pip/pip-tools, install from requirements.txt
+            if [[ -f "requirements.txt" ]]; then
+              if [[ "$INCLUDE_DEV" == "true" ]] && [[ -f "requirements-dev.txt" ]]; then
+                python -m pip install -r requirements.txt -r requirements-dev.txt || echo "⚠️ Pip install failed, continuing with available packages"
+              else
+                python -m pip install -r requirements.txt || echo "⚠️ Pip install failed, continuing with available packages"
+              fi
+            elif [[ -f "pyproject.toml" ]]; then
+              # For pyproject.toml, cyclonedx-py can read it directly, so we don't need to install dependencies
+              echo "📦 Using pyproject.toml directly (no dependency installation needed)"
+            else
+              echo "⚠️ No requirements.txt or pyproject.toml found, skipping dependency installation"
+            fi
+            ;;
+        esac
+
+        echo "✅ Dependencies installation completed (some may have failed)"
+
+    - name: "Install CycloneDX BOM generator"
+      shell: bash
+      working-directory: ${{ steps.project_dir.outputs.project_dir }}
+      run: |
+        set -euo pipefail
+
+        TOOL="${{ steps.detect_tool.outputs.dependency_manager }}"
+
+        echo "🔧 Installing cyclonedx-bom..."
+
+        # Install cyclonedx-bom into the virtual environment without modifying project files
+        case "$TOOL" in
+          uv)
+            uv pip install --no-cache-dir cyclonedx-bom || {
+              echo "❌ Failed to install cyclonedx-bom with uv"
+              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+                exit 1
+              else
+                echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
+                exit 0
+              fi
+            }
+            ;;
+
+          pdm)
+            pdm run pip install cyclonedx-bom || {
+              echo "❌ Failed to install cyclonedx-bom with pdm"
+              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+                exit 1
+              else
+                echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
+                exit 0
+              fi
+            }
+            ;;
+
+          poetry)
+            poetry run pip install cyclonedx-bom || {
+              echo "❌ Failed to install cyclonedx-bom with poetry"
+              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+                exit 1
+              else
+                echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
+                exit 0
+              fi
+            }
+            ;;
+
+          pipenv)
+            pipenv run pip install cyclonedx-bom || {
+              echo "❌ Failed to install cyclonedx-bom with pipenv"
+              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+                exit 1
+              else
+                echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
+                exit 0
+              fi
+            }
+            ;;
+
+          pip-tools|pip)
+            # For pip/pip-tools, install globally as there's no virtual environment management
+            python -m pip install cyclonedx-bom || {
+              echo "❌ Failed to install cyclonedx-bom with pip"
+              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+                exit 1
+              else
+                echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
+                exit 0
+              fi
+            }
+            ;;
+
+          *)
+            echo "❌ Unsupported tool for cyclonedx-bom installation: $TOOL"
+            if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+              exit 1
+            else
+              echo "::warning::Cannot install cyclonedx-bom for unsupported tool, SBOM generation will fail"
+              exit 0
+            fi
+            ;;
+        esac
+
+        echo "✅ cyclonedx-bom installed successfully with $TOOL"
+
+    - name: "Generate SBOM"
+      id: generate_sbom
+      shell: bash
+      working-directory: ${{ steps.project_dir.outputs.project_dir }}
+      run: |
+        set -euo pipefail
+
+        TOOL="${{ steps.detect_tool.outputs.dependency_manager }}"
+        FORMAT="${{ inputs.sbom_format }}"
+        SPEC_VERSION="${{ inputs.sbom_spec_version }}"
+        OUTPUT_BASE="${{ inputs.filename_prefix }}"
+
+        echo "🏗️ Generating SBOM with CycloneDX..."
+
+        # Determine the command prefix based on the tool
+        case "$TOOL" in
+          uv)
+            CMD_PREFIX="uv run"
+            ;;
+          pdm)
+            CMD_PREFIX="pdm run"
+            ;;
+          poetry)
+            CMD_PREFIX="poetry run"
+            ;;
+          pipenv)
+            CMD_PREFIX="pipenv run"
+            ;;
+          pip-tools|pip)
+            CMD_PREFIX=""
+            ;;
+        esac
+
+        # Determine output paths using absolute output directory
+        OUTPUT_DIR="${{ steps.project_dir.outputs.output_dir }}"
+        JSON_OUTPUT_PATH="$OUTPUT_DIR/${OUTPUT_BASE}.json"
+        XML_OUTPUT_PATH="$OUTPUT_DIR/${OUTPUT_BASE}.xml"
+
+        # Generate JSON SBOM
+        if [[ "$FORMAT" == "json" ]] || [[ "$FORMAT" == "both" ]]; then
+          echo "Generating JSON SBOM..."
+          # Use --pyproject parameter if we have a pyproject.toml file
+          if [[ "${{ steps.detect_tool.outputs.lock_file }}" == "pyproject.toml" ]]; then
+            $CMD_PREFIX cyclonedx-py environment \
+              --pyproject pyproject.toml \
+              --of JSON \
+              -o "$JSON_OUTPUT_PATH" \
+              --sv "$SPEC_VERSION"
+          else
+            $CMD_PREFIX cyclonedx-py environment \
+              --of JSON \
+              -o "$JSON_OUTPUT_PATH" \
+              --sv "$SPEC_VERSION"
+          fi
+
+          if [[ -f "$JSON_OUTPUT_PATH" ]]; then
+            echo "sbom_json_path=$(realpath "$JSON_OUTPUT_PATH")" >> \
+                 "$GITHUB_OUTPUT"
+            echo "✅ JSON SBOM generated: $JSON_OUTPUT_PATH"
+          else
+            echo "❌ Failed to generate JSON SBOM"
+            if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+              exit 1
+            fi
+          fi
+        fi
+
+        # Generate XML SBOM
+        if [[ "$FORMAT" == "xml" ]] || [[ "$FORMAT" == "both" ]]; then
+          echo "Generating XML SBOM..."
+          # Use --pyproject parameter if we have a pyproject.toml file
+          if [[ "${{ steps.detect_tool.outputs.lock_file }}" == "pyproject.toml" ]]; then
+            $CMD_PREFIX cyclonedx-py environment \
+              --pyproject pyproject.toml \
+              --of XML \
+              -o "$XML_OUTPUT_PATH" \
+              --sv "$SPEC_VERSION"
+          else
+            $CMD_PREFIX cyclonedx-py environment \
+              --of XML \
+              -o "$XML_OUTPUT_PATH" \
+              --sv "$SPEC_VERSION"
+          fi
+
+          if [[ -f "$XML_OUTPUT_PATH" ]]; then
+            echo "sbom_xml_path=$(realpath "$XML_OUTPUT_PATH")" >> "$GITHUB_OUTPUT"
+            echo "✅ XML SBOM generated: $XML_OUTPUT_PATH"
+          else
+            echo "❌ Failed to generate XML SBOM"
+            if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+              exit 1
+            fi
+          fi
+        fi
+
+        # Count components in JSON SBOM (if available)
+        COMPONENT_COUNT=0
+        if [[ -f "$JSON_OUTPUT_PATH" ]]; then
+          if command -v jq >/dev/null 2>&1; then
+            COMPONENT_COUNT=$(jq '.components | length' "$JSON_OUTPUT_PATH" 2>/dev/null || echo "0")
+          fi
+        fi
+
+        echo "component_count=$COMPONENT_COUNT" >> "$GITHUB_OUTPUT"
+
+        # Generate summary
+        {
+          echo "## 📋 SBOM Generation Results"
+          echo "**Dependency Manager:** $TOOL"
+          echo "**Format:** $FORMAT"
+          echo "**Specification Version:** $SPEC_VERSION"
+          echo "**Components Found:** $COMPONENT_COUNT"
+          echo ""
+          echo "### Generated Files"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [[ -f "$JSON_OUTPUT_PATH" ]]; then
+          echo "- ✅ \`$JSON_OUTPUT_PATH\`" >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [[ -f "$XML_OUTPUT_PATH" ]]; then
+          echo "- ✅ \`$XML_OUTPUT_PATH\`" >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: "Validate SBOM files"
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        OUTPUT_BASE="${{ inputs.filename_prefix }}"
+        OUTPUT_DIR="${{ steps.project_dir.outputs.output_dir }}"
+        FORMAT="${{ inputs.sbom_format }}"
+        JSON_PATH="$OUTPUT_DIR/${OUTPUT_BASE}.json"
+        XML_PATH="$OUTPUT_DIR/${OUTPUT_BASE}.xml"
+
+        echo "🔍 Validating generated SBOM files..."
+
+        # Validate JSON SBOM
+        if [[ -f "$JSON_PATH" ]]; then
+          if command -v jq >/dev/null 2>&1; then
+            if jq empty "$JSON_PATH" 2>/dev/null; then
+              echo "✅ JSON SBOM is valid"
+            else
+              echo "❌ JSON SBOM is invalid"
+              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+                exit 1
+              fi
+            fi
+          else
+            echo "⚠️ jq not available for JSON validation"
+          fi
+
+          # Show file size
+          JSON_SIZE=$(ls -lh "$JSON_PATH" | awk '{print $5}')
+          echo "📏 JSON SBOM size: $JSON_SIZE"
+        fi
+
+        # Validate XML SBOM
+        if [[ -f "$XML_PATH" ]]; then
+          # Basic XML validation (check if well-formed)
+          if command -v xmllint >/dev/null 2>&1; then
+            if xmllint --noout "$XML_PATH" 2>/dev/null; then
+              echo "✅ XML SBOM is well-formed"
+            else
+              echo "❌ XML SBOM is malformed"
+              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+                exit 1
+              fi
+            fi
+          else
+            echo "⚠️ xmllint not available for XML validation"
+          fi
+
+          # Show file size
+          XML_SIZE=$(ls -lh "$XML_PATH" | awk '{print $5}')
+          echo "📏 XML SBOM size: $XML_SIZE"
+        fi
+
+        echo "🎉 SBOM generation completed successfully!"
