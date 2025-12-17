@@ -105,16 +105,16 @@ steps:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name | Required | Default | Description |
-|------|----------|---------|-------------|
-| `python_version` | No | `3.12` | Python version for SBOM generation |
-| `include_dev` | No | `false` | Include dev dependencies in SBOM |
-| `sbom_format` | No | `both` | SBOM format: 'json', 'xml', or 'both' |
-| `sbom_spec_version` | No | `1.5` | CycloneDX specification version |
-| `filename_prefix` | No | `sbom-cyclonedx` | Base filename for SBOM output |
-| `path_prefix` | No | `.` | Directory location containing project code |
-| `output_directory` | No | `.` | Directory location to write SBOM reports |
-| `fail_on_error` | No | `true` | Fail action if SBOM generation fails |
+| Name                | Required | Default          | Description                                |
+| ------------------- | -------- | ---------------- | ------------------------------------------ |
+| `python_version`    | No       | `3.12`           | Python version for SBOM generation         |
+| `include_dev`       | No       | `false`          | Include dev dependencies in SBOM           |
+| `sbom_format`       | No       | `both`           | SBOM format: 'json', 'xml', or 'both'      |
+| `sbom_spec_version` | No       | `1.5`            | CycloneDX specification version            |
+| `filename_prefix`   | No       | `sbom-cyclonedx` | Base filename for SBOM output              |
+| `path_prefix`       | No       | `.`              | Directory location containing project code |
+| `output_directory`  | No       | `.`              | Directory location to write SBOM reports   |
+| `fail_on_error`     | No       | `true`           | Fail action if SBOM generation fails       |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -135,12 +135,12 @@ appends the appropriate extensions based on the `sbom_format` setting.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name | Description |
-|------|-------------|
-| `sbom_json_path` | Full path to generated JSON SBOM file |
-| `sbom_xml_path` | Full path to generated XML SBOM file |
-| `dependency_manager` | Detected Python dependency manager |
-| `component_count` | Number of components found in the generated SBOM |
+| Name                 | Description                                      |
+| -------------------- | ------------------------------------------------ |
+| `sbom_json_path`     | Full path to generated JSON SBOM file            |
+| `sbom_xml_path`      | Full path to generated XML SBOM file             |
+| `dependency_manager` | Detected Python dependency manager               |
+| `component_count`    | Number of components found in the generated SBOM |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -161,14 +161,14 @@ The action detects dependency management tools in the following priority order:
 
 <!-- markdownlint-disable MD013 -->
 
-| Tool | Lock File | Install Command | Dev Dependencies |
-|------|-----------|-----------------|------------------|
-| uv | `uv.lock` | `uv sync --locked [--no-dev]` | Via `include_dev` |
-| PDM | `pdm.lock` | `pdm sync [--prod] --no-self` | Via `include_dev` |
-| Poetry | `poetry.lock` | `poetry install --no-root` | Via `include_dev` |
-| Pipenv | `Pipfile.lock` | `pipenv install --deploy` | Via `include_dev` |
-| pip-tools | `requirements.txt` | `pip install -r requirements.txt` | Via dev |
-| pip | `requirements.txt` | `pip install -r requirements.txt` | Via dev |
+| Tool      | Lock File          | Install Command                   | Dev Dependencies  |
+| --------- | ------------------ | --------------------------------- | ----------------- |
+| uv        | `uv.lock`          | `uv sync --locked [--no-dev]`     | Via `include_dev` |
+| PDM       | `pdm.lock`         | `pdm sync [--prod] --no-self`     | Via `include_dev` |
+| Poetry    | `poetry.lock`      | `poetry install --no-root`        | Via `include_dev` |
+| Pipenv    | `Pipfile.lock`     | `pipenv install --deploy`         | Via `include_dev` |
+| pip-tools | `requirements.txt` | `pip install -r requirements.txt` | Via dev           |
+| pip       | `requirements.txt` | `pip install -r requirements.txt` | Via dev           |
 
 <!-- markdownlint-enable MD013 -->
 
