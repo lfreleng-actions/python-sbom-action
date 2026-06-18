@@ -73,9 +73,9 @@ runs:
         set -euo pipefail
 
         # Determine project directory (where source code is located)
-        if [[ -n "${{ inputs.path_prefix }}" && \
-          "${{ inputs.path_prefix }}" != "." ]]; then
-          PROJECT_DIR="${{ inputs.path_prefix }}"
+        if [[ -n "${INPUTS_PATH_PREFIX}" && \
+          "${INPUTS_PATH_PREFIX}" != "." ]]; then
+          PROJECT_DIR="${INPUTS_PATH_PREFIX}"
           echo "Using path_prefix: $PROJECT_DIR"
         else
           PROJECT_DIR="."
@@ -83,11 +83,17 @@ runs:
         fi
 
         # Determine output directory (where SBOM reports will be written)
-        # Convert to absolute path to avoid working directory issues
-        if [[ "${{ inputs.output_directory }}" = "." ]]; then
+        # Convert to absolute path to avoid working directory issues. An
+        # empty output_directory is treated the same as the default '.'.
+        out_dir_input="${INPUTS_OUTPUT_DIRECTORY}"
+        if [[ -z "$out_dir_input" || "$out_dir_input" = "." ]]; then
           OUTPUT_DIR="$(pwd)"
         else
-          OUTPUT_DIR="$(realpath "${{ inputs.output_directory }}")"
+          # Create the directory first so realpath can resolve it even
+          # when it does not yet exist; realpath fails on a missing path
+          # and would abort the step under 'set -e'.
+          mkdir -p -- "$out_dir_input"
+          OUTPUT_DIR="$(realpath -- "$out_dir_input")"
         fi
         echo "SBOM reports will be written to: $OUTPUT_DIR"
 
@@ -98,12 +104,28 @@ runs:
         fi
 
         # Create output directory if it doesn't exist
-        mkdir -p "$OUTPUT_DIR"
+        mkdir -p -- "$OUTPUT_DIR"
 
         echo "✅ Validated project directory: $PROJECT_DIR"
         echo "✅ Prepared output directory: $OUTPUT_DIR"
-        echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-        echo "output_dir=$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+        # Use the multiline (heredoc) output form with a per-run
+        # unpredictable delimiter so values cannot inject additional
+        # outputs via embedded newlines or a crafted delimiter line.
+        # The delimiter is sourced from /dev/urandom (via od/tr, no
+        # external network tools) so it cannot be made predictable
+        # through a caller-inherited RANDOM environment.
+        _delim="ghadelim-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+        {
+          echo "project_dir<<${_delim}"
+          echo "$PROJECT_DIR"
+          echo "${_delim}"
+          echo "output_dir<<${_delim}"
+          echo "$OUTPUT_DIR"
+          echo "${_delim}"
+        } >> "$GITHUB_OUTPUT"
+      env:
+        INPUTS_PATH_PREFIX: ${{ inputs.path_prefix }}
+        INPUTS_OUTPUT_DIRECTORY: ${{ inputs.output_directory }}
 
     - name: "Detect Python dependency management tool"
       id: detect_tool
@@ -166,7 +188,7 @@ runs:
           echo "❌ No supported Python dependency files found"
           echo "Supported files: uv.lock, pdm.lock, poetry.lock," \
                "Pipfile.lock, requirements.txt, pyproject.toml"
-          if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+          if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
             exit 1
           else
             echo "::warning::No dependency files found," \
@@ -184,6 +206,8 @@ runs:
           echo "**Detected Tool:** $DETECTED_TOOL"
           echo "**Lock File:** $LOCK_FILE"
         } >> "$GITHUB_STEP_SUMMARY"
+      env:
+        INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
 
     - name: "Setup Python"
       # yamllint disable rule:line-length
@@ -195,10 +219,14 @@ runs:
       id: setup_tool
       shell: bash
       working-directory: ${{ steps.project_dir.outputs.project_dir }}
-      run: |
+      # The only environment-file write here adds the uv installation
+      # directory ($HOME/.local/bin) to GITHUB_PATH, which is the standard,
+      # safe mechanism for exposing an installed tool; the value is a fixed
+      # path, not untrusted input.
+      run: | # zizmor: ignore[github-env]
         set -euo pipefail
 
-        TOOL="${{ steps.detect_tool.outputs.dependency_manager }}"
+        TOOL="${STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER}"
         echo "🛠️ Setting up $TOOL..."
 
         case "$TOOL" in
@@ -246,6 +274,8 @@ runs:
             exit 1
             ;;
         esac
+      env:
+        STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
 
     - name: "Install dependencies"
       id: install_deps
@@ -254,8 +284,8 @@ runs:
       run: |
         set -euo pipefail
 
-        TOOL="${{ steps.detect_tool.outputs.dependency_manager }}"
-        INCLUDE_DEV="${{ inputs.include_dev }}"
+        TOOL="${STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER}"
+        INCLUDE_DEV="${INPUTS_INCLUDE_DEV}"
 
         echo "📦 Installing dependencies with $TOOL..."
 
@@ -311,6 +341,9 @@ runs:
         esac
 
         echo "✅ Dependencies installation completed (some may have failed)"
+      env:
+        STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
+        INPUTS_INCLUDE_DEV: ${{ inputs.include_dev }}
 
     - name: "Install CycloneDX BOM generator"
       shell: bash
@@ -318,7 +351,7 @@ runs:
       run: |
         set -euo pipefail
 
-        TOOL="${{ steps.detect_tool.outputs.dependency_manager }}"
+        TOOL="${STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER}"
 
         echo "🔧 Installing cyclonedx-bom..."
 
@@ -327,7 +360,7 @@ runs:
           uv)
             uv pip install --no-cache-dir cyclonedx-bom || {
               echo "❌ Failed to install cyclonedx-bom with uv"
-              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
                 exit 1
               else
                 echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
@@ -339,7 +372,7 @@ runs:
           pdm)
             pdm run pip install cyclonedx-bom || {
               echo "❌ Failed to install cyclonedx-bom with pdm"
-              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
                 exit 1
               else
                 echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
@@ -351,7 +384,7 @@ runs:
           poetry)
             poetry run pip install cyclonedx-bom || {
               echo "❌ Failed to install cyclonedx-bom with poetry"
-              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
                 exit 1
               else
                 echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
@@ -363,7 +396,7 @@ runs:
           pipenv)
             pipenv run pip install cyclonedx-bom || {
               echo "❌ Failed to install cyclonedx-bom with pipenv"
-              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
                 exit 1
               else
                 echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
@@ -376,7 +409,7 @@ runs:
             # For pip/pip-tools, install globally as there's no virtual environment management
             python -m pip install cyclonedx-bom || {
               echo "❌ Failed to install cyclonedx-bom with pip"
-              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
                 exit 1
               else
                 echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
@@ -387,7 +420,7 @@ runs:
 
           *)
             echo "❌ Unsupported tool for cyclonedx-bom installation: $TOOL"
-            if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+            if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
               exit 1
             else
               echo "::warning::Cannot install cyclonedx-bom for unsupported tool, SBOM generation will fail"
@@ -397,6 +430,9 @@ runs:
         esac
 
         echo "✅ cyclonedx-bom installed successfully with $TOOL"
+      env:
+        STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
+        INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
 
     - name: "Generate SBOM"
       id: generate_sbom
@@ -405,10 +441,10 @@ runs:
       run: |
         set -euo pipefail
 
-        TOOL="${{ steps.detect_tool.outputs.dependency_manager }}"
-        FORMAT="${{ inputs.sbom_format }}"
-        SPEC_VERSION="${{ inputs.sbom_spec_version }}"
-        OUTPUT_BASE="${{ inputs.filename_prefix }}"
+        TOOL="${STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER}"
+        FORMAT="${INPUTS_SBOM_FORMAT}"
+        SPEC_VERSION="${INPUTS_SBOM_SPEC_VERSION}"
+        OUTPUT_BASE="${INPUTS_FILENAME_PREFIX}"
 
         echo "🏗️ Generating SBOM with CycloneDX..."
 
@@ -432,15 +468,20 @@ runs:
         esac
 
         # Determine output paths using absolute output directory
-        OUTPUT_DIR="${{ steps.project_dir.outputs.output_dir }}"
+        OUTPUT_DIR="${STEPS_PROJECT_DIR_OUTPUTS_OUTPUT_DIR}"
         JSON_OUTPUT_PATH="$OUTPUT_DIR/${OUTPUT_BASE}.json"
         XML_OUTPUT_PATH="$OUTPUT_DIR/${OUTPUT_BASE}.xml"
+        # Per-run unpredictable delimiter for multiline GITHUB_OUTPUT
+        # writes so path values cannot inject additional outputs via
+        # newlines. Sourced from /dev/urandom (via od/tr) so it is not
+        # predictable through a caller-inherited RANDOM environment.
+        _delim="ghadelim-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 
         # Generate JSON SBOM
         if [[ "$FORMAT" == "json" ]] || [[ "$FORMAT" == "both" ]]; then
           echo "Generating JSON SBOM..."
           # Use --pyproject parameter if we have a pyproject.toml file
-          if [[ "${{ steps.detect_tool.outputs.lock_file }}" == "pyproject.toml" ]]; then
+          if [[ "${STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE}" == "pyproject.toml" ]]; then
             $CMD_PREFIX cyclonedx-py environment \
               --pyproject pyproject.toml \
               --of JSON \
@@ -454,12 +495,15 @@ runs:
           fi
 
           if [[ -f "$JSON_OUTPUT_PATH" ]]; then
-            echo "sbom_json_path=$(realpath "$JSON_OUTPUT_PATH")" >> \
-                 "$GITHUB_OUTPUT"
+            {
+              echo "sbom_json_path<<${_delim}"
+              realpath "$JSON_OUTPUT_PATH"
+              echo "${_delim}"
+            } >> "$GITHUB_OUTPUT"
             echo "✅ JSON SBOM generated: $JSON_OUTPUT_PATH"
           else
             echo "❌ Failed to generate JSON SBOM"
-            if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+            if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
               exit 1
             fi
           fi
@@ -469,7 +513,7 @@ runs:
         if [[ "$FORMAT" == "xml" ]] || [[ "$FORMAT" == "both" ]]; then
           echo "Generating XML SBOM..."
           # Use --pyproject parameter if we have a pyproject.toml file
-          if [[ "${{ steps.detect_tool.outputs.lock_file }}" == "pyproject.toml" ]]; then
+          if [[ "${STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE}" == "pyproject.toml" ]]; then
             $CMD_PREFIX cyclonedx-py environment \
               --pyproject pyproject.toml \
               --of XML \
@@ -483,11 +527,15 @@ runs:
           fi
 
           if [[ -f "$XML_OUTPUT_PATH" ]]; then
-            echo "sbom_xml_path=$(realpath "$XML_OUTPUT_PATH")" >> "$GITHUB_OUTPUT"
+            {
+              echo "sbom_xml_path<<${_delim}"
+              realpath "$XML_OUTPUT_PATH"
+              echo "${_delim}"
+            } >> "$GITHUB_OUTPUT"
             echo "✅ XML SBOM generated: $XML_OUTPUT_PATH"
           else
             echo "❌ Failed to generate XML SBOM"
-            if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+            if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
               exit 1
             fi
           fi
@@ -521,15 +569,23 @@ runs:
         if [[ -f "$XML_OUTPUT_PATH" ]]; then
           echo "- ✅ \`$XML_OUTPUT_PATH\`" >> "$GITHUB_STEP_SUMMARY"
         fi
+      env:
+        STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
+        INPUTS_SBOM_FORMAT: ${{ inputs.sbom_format }}
+        INPUTS_SBOM_SPEC_VERSION: ${{ inputs.sbom_spec_version }}
+        INPUTS_FILENAME_PREFIX: ${{ inputs.filename_prefix }}
+        STEPS_PROJECT_DIR_OUTPUTS_OUTPUT_DIR: ${{ steps.project_dir.outputs.output_dir }}
+        STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE: ${{ steps.detect_tool.outputs.lock_file }}
+        INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
 
     - name: "Validate SBOM files"
       shell: bash
       run: |
         set -euo pipefail
 
-        OUTPUT_BASE="${{ inputs.filename_prefix }}"
-        OUTPUT_DIR="${{ steps.project_dir.outputs.output_dir }}"
-        FORMAT="${{ inputs.sbom_format }}"
+        OUTPUT_BASE="${INPUTS_FILENAME_PREFIX}"
+        OUTPUT_DIR="${STEPS_PROJECT_DIR_OUTPUTS_OUTPUT_DIR}"
+        FORMAT="${INPUTS_SBOM_FORMAT}"
         JSON_PATH="$OUTPUT_DIR/${OUTPUT_BASE}.json"
         XML_PATH="$OUTPUT_DIR/${OUTPUT_BASE}.xml"
 
@@ -542,7 +598,7 @@ runs:
               echo "✅ JSON SBOM is valid"
             else
               echo "❌ JSON SBOM is invalid"
-              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
                 exit 1
               fi
             fi
@@ -563,7 +619,7 @@ runs:
               echo "✅ XML SBOM is well-formed"
             else
               echo "❌ XML SBOM is malformed"
-              if [[ "${{ inputs.fail_on_error }}" == "true" ]]; then
+              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
                 exit 1
               fi
             fi
@@ -577,3 +633,8 @@ runs:
         fi
 
         echo "🎉 SBOM generation completed successfully!"
+      env:
+        INPUTS_FILENAME_PREFIX: ${{ inputs.filename_prefix }}
+        STEPS_PROJECT_DIR_OUTPUTS_OUTPUT_DIR: ${{ steps.project_dir.outputs.output_dir }}
+        INPUTS_SBOM_FORMAT: ${{ inputs.sbom_format }}
+        INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
