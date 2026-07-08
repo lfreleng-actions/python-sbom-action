@@ -61,6 +61,8 @@ jobs:
       - name: "Checkout local Action"
         # yamllint disable-line rule:line-length
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: "Checkout test repository: ${{ matrix.description }}"
         # yamllint disable-line rule:line-length
@@ -69,6 +71,7 @@ jobs:
           repository: ${{ matrix.repository }}
           path: test-project
           fetch-depth: 1
+          persist-credentials: false
 
       - name: "Debug: List test project files"
         shell: bash
@@ -128,15 +131,19 @@ jobs:
 
       - name: "Validate SBOM generation results"
         shell: bash
+        env:
+          MATRIX_DESCRIPTION: ${{ matrix.description }}
+          MATRIX_REPOSITORY: ${{ matrix.repository }}
+          EXPECTED_MANAGER: ${{ matrix.expected_manager }}
         run: |
-          echo "🔍 Validating SBOM generation for ${{ matrix.description }}"
+          echo "🔍 Validating SBOM generation for $MATRIX_DESCRIPTION"
 
           # Check if SBOM generation succeeded
           if [[ "${{ steps.generate-sbom.outcome }}" != "success" ]]; then
-            desc="${{ matrix.description }}"
+            desc="$MATRIX_DESCRIPTION"
             echo "❌ SBOM generation failed for $desc"
             echo "This might be expected for some repos"
-            repo="${{ matrix.repository }}"
+            repo="$MATRIX_REPOSITORY"
             echo "::warning::SBOM generation failed for $repo"
             exit 0
           fi
@@ -145,12 +152,11 @@ jobs:
 
           # Validate dependency manager detection
           detected="${{ steps.generate-sbom.outputs.dependency_manager }}"
-          expected="${{ matrix.expected_manager }}"
+          expected="$EXPECTED_MANAGER"
 
           if [[ -n "$detected" && "$detected" != "$expected" ]]; then
             echo "⚠️ Expected '$expected', got '$detected'"
-            # yamllint disable-next-line rule:line-length
-            repo="${{ matrix.repository }}"
+            repo="$MATRIX_REPOSITORY"
             echo "::warning::Manager mismatch: $repo '$expected'/'$detected'"
           elif [[ -n "$detected" ]]; then
             echo "✅ Dependency manager correctly detected: $detected"
@@ -189,10 +195,10 @@ jobs:
           fi
 
           if [[ "$json_found" == true ]] || [[ "$xml_found" == true ]]; then
-            echo "✅ SBOM generation test passed for ${{ matrix.description }}"
+            echo "✅ SBOM generation test passed for $MATRIX_DESCRIPTION"
           else
             echo "⚠️ No SBOM files found, but generation didn't fail"
-            repo="${{ matrix.repository }}"
+            repo="$MATRIX_REPOSITORY"
             echo "::warning::No SBOM files generated for $repo"
           fi
 
@@ -217,8 +223,8 @@ jobs:
       - test-sbom-generation
     if: always()
     permissions:
-      contents: read
-      actions: read
+      contents: read  # Checkout repository and read its contents
+      actions: read  # List workflow run artifacts via the GitHub API
     timeout-minutes: 5
     steps:
       # yamllint disable-line rule:line-length
@@ -229,11 +235,13 @@ jobs:
       - name: "Evaluate matrix job results"
         id: evaluate
         shell: bash
+        env:
+          MATRIX_RESULT: ${{ needs.test-sbom-generation.result }}
         run: |
           echo "🔍 Evaluating individual matrix job results..."
 
-          # Matrix job results (passed as JSON)
-          overall_result='${{ needs.test-sbom-generation.result }}'
+          # Overall matrix job result (success/failure/cancelled/skipped)
+          overall_result="$MATRIX_RESULT"
 
           echo "Overall matrix result: $overall_result"
 
@@ -245,9 +253,8 @@ jobs:
           echo "📊 Individual Job Results:"
           echo "========================="
 
-          # Since we can't easily parse JSON in bash, we'll check the overall
-          # result
-          # and count artifacts to validate success
+          # The needs context only exposes the overall matrix result,
+          # so we check it here and count artifacts to validate success
 
           if [[ "$overall_result" == "success" ]]; then
             echo "✅ Matrix jobs completed successfully"
@@ -267,12 +274,15 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          EXPECTED_JOBS: ${{ steps.evaluate.outputs.expected_jobs }}
         run: |
           echo "🔍 Counting SBOM artifacts via GitHub API..."
 
-          expected_jobs=${{ steps.evaluate.outputs.expected_jobs }}
-          run_id="${{ github.run_id }}"
-          repo="${{ github.repository }}"
+          expected_jobs="$EXPECTED_JOBS"
+          run_id="$RUN_ID"
+          repo="$REPO"
 
           # Wait up to 2 minutes for artifacts to be uploaded
           max_attempts=12
@@ -323,10 +333,14 @@ jobs:
 
       - name: "Generate test summary"
         shell: bash
+        env:
+          EXPECTED_JOBS: ${{ steps.evaluate.outputs.expected_jobs }}
+          ARTIFACT_COUNT: ${{ steps.validate.outputs.artifact_count }}
+          FINAL_RESULT: ${{ steps.validate.outputs.final_result }}
         run: |
-          expected_jobs=${{ steps.evaluate.outputs.expected_jobs }}
-          artifact_count=${{ steps.validate.outputs.artifact_count }}
-          final_result="${{ steps.validate.outputs.final_result }}"
+          expected_jobs="$EXPECTED_JOBS"
+          artifact_count="$ARTIFACT_COUNT"
+          final_result="$FINAL_RESULT"
 
           {
             echo "# 🎉 Python SBOM Action Test Results"
@@ -364,10 +378,14 @@ jobs:
 
       - name: "Fail if not all SBOMs generated"
         shell: bash
+        env:
+          EXPECTED_JOBS: ${{ steps.evaluate.outputs.expected_jobs }}
+          ARTIFACT_COUNT: ${{ steps.validate.outputs.artifact_count }}
+          FINAL_RESULT: ${{ steps.validate.outputs.final_result }}
         run: |
-          final_result="${{ steps.validate.outputs.final_result }}"
-          expected_jobs=${{ steps.evaluate.outputs.expected_jobs }}
-          artifact_count=${{ steps.validate.outputs.artifact_count }}
+          final_result="$FINAL_RESULT"
+          expected_jobs="$EXPECTED_JOBS"
+          artifact_count="$ARTIFACT_COUNT"
 
           if [[ "$final_result" != "success" ]]; then
             echo "❌ Test suite failed: Only $artifact_count/$expected_jobs " \
