@@ -113,16 +113,22 @@ jobs:
 
       - name: "Debug: Check SBOM generation outputs"
         shell: bash
+        env:
+          SBOM_OUTCOME: ${{ steps.generate-sbom.outcome }}
+          SBOM_MANAGER: ${{ steps.generate-sbom.outputs.dependency_manager }}
+          SBOM_COUNT: ${{ steps.generate-sbom.outputs.component_count }}
+          SBOM_JSON_PATH: ${{ steps.generate-sbom.outputs.sbom_json_path }}
+          SBOM_XML_PATH: ${{ steps.generate-sbom.outputs.sbom_xml_path }}
         run: |
           echo "🔍 Checking SBOM generation results:"
-          echo "Step outcome: ${{ steps.generate-sbom.outcome }}"
-          detected_mgr="${{ steps.generate-sbom.outputs.dependency_manager }}"
+          echo "Step outcome: $SBOM_OUTCOME"
+          detected_mgr="$SBOM_MANAGER"
           echo "Dependency manager: '$detected_mgr'"
-          component_count="${{ steps.generate-sbom.outputs.component_count }}"
+          component_count="$SBOM_COUNT"
           echo "Component count: '$component_count'"
-          json_path="${{ steps.generate-sbom.outputs.sbom_json_path }}"
+          json_path="$SBOM_JSON_PATH"
           echo "JSON path: '$json_path'"
-          xml_path="${{ steps.generate-sbom.outputs.sbom_xml_path }}"
+          xml_path="$SBOM_XML_PATH"
           echo "XML path: '$xml_path'"
           echo ""
           echo "🔍 Looking for generated files:"
@@ -135,11 +141,16 @@ jobs:
           MATRIX_DESCRIPTION: ${{ matrix.description }}
           MATRIX_REPOSITORY: ${{ matrix.repository }}
           EXPECTED_MANAGER: ${{ matrix.expected_manager }}
+          SBOM_OUTCOME: ${{ steps.generate-sbom.outcome }}
+          SBOM_MANAGER: ${{ steps.generate-sbom.outputs.dependency_manager }}
+          SBOM_COUNT: ${{ steps.generate-sbom.outputs.component_count }}
+          SBOM_JSON_PATH: ${{ steps.generate-sbom.outputs.sbom_json_path }}
+          SBOM_XML_PATH: ${{ steps.generate-sbom.outputs.sbom_xml_path }}
         run: |
           echo "🔍 Validating SBOM generation for $MATRIX_DESCRIPTION"
 
           # Check if SBOM generation succeeded
-          if [[ "${{ steps.generate-sbom.outcome }}" != "success" ]]; then
+          if [[ "$SBOM_OUTCOME" != "success" ]]; then
             desc="$MATRIX_DESCRIPTION"
             echo "❌ SBOM generation failed for $desc"
             echo "This might be expected for some repos"
@@ -151,7 +162,7 @@ jobs:
           echo "✅ SBOM generation succeeded"
 
           # Validate dependency manager detection
-          detected="${{ steps.generate-sbom.outputs.dependency_manager }}"
+          detected="$SBOM_MANAGER"
           expected="$EXPECTED_MANAGER"
 
           if [[ -n "$detected" && "$detected" != "$expected" ]]; then
@@ -167,8 +178,8 @@ jobs:
           xml_found=false
 
           # Get the actual file paths from action outputs
-          json_path="${{ steps.generate-sbom.outputs.sbom_json_path }}"
-          xml_path="${{ steps.generate-sbom.outputs.sbom_xml_path }}"
+          json_path="$SBOM_JSON_PATH"
+          xml_path="$SBOM_XML_PATH"
 
           if [[ -n "$json_path" && -f "$json_path" ]]; then
             json_found=true
@@ -187,7 +198,7 @@ jobs:
           fi
 
           # Check component count if available
-          component_count="${{ steps.generate-sbom.outputs.component_count }}"
+          component_count="$SBOM_COUNT"
           if [[ -n "$component_count" && "$component_count" != "0" ]]; then
             echo "✅ Component count: $component_count"
           elif [[ "$component_count" == "0" ]]; then
