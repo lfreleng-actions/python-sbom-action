@@ -101,6 +101,27 @@ repos:
     hooks:
       - id: codespell
 
+  # Requires a mirror, primary repo lacks .pre-commit-hooks.yaml
+  - repo: https://github.com/DetachHead/basedpyright-prek-mirror
+    rev: 706e6acebe9e88c2c28d1527d3085a14b11794c4  # frozen: 1.40.1
+    hooks:
+      - id: basedpyright
+        # --warnings fails on warnings as well as errors, so a finding that
+        # an editor shows cannot pass the hook. Explicit directories with
+        # filename passing disabled analyse the whole scope even when only
+        # some files are staged; keep them in step with `include` in
+        # pyproject.toml.
+        #
+        # No additional_dependencies: the scanned code imports only the
+        # standard library. The third-party imports in
+        # tests/test-projects.py sit inside strings it writes out as
+        # sample projects. Add packages here if real imports appear.
+        pass_filenames: false
+        # Run even when no Python file is staged, so config-only changes
+        # and Python deletions are still checked.
+        always_run: true
+        args: [--warnings, tests]
+
   - repo: https://github.com/python-jsonschema/check-jsonschema
     rev: 4f85d46a92dc17713078e5de73f8a13190edf6fc  # frozen: 0.38.2
     hooks:
