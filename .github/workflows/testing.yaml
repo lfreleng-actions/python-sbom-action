@@ -227,6 +227,136 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  test-install-failures:
+    name: "Inconsistent ${{ matrix.manager }} project"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - manager: "uv"
+            expected_manager: "uv"
+          - manager: "pdm"
+            expected_manager: "pdm"
+          - manager: "poetry"
+            expected_manager: "poetry"
+          - manager: "pipenv"
+            expected_manager: "pipenv"
+          - manager: "pip"
+            expected_manager: "pip-tools"
+
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout local Action"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The committed fixture is consistent, so this run proves the
+      # environment can produce an SBOM; the failure the next run
+      # expects can then only come from the inconsistency added below.
+      - name: "Control: consistent fixture"
+        id: control
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/install-check/${{ matrix.manager }}"
+          output_directory: "control"
+
+      - name: "Make the fixture inconsistent"
+        shell: bash
+        env:
+          MANAGER: ${{ matrix.manager }}
+        run: |
+          set -euo pipefail
+          cd "tests/fixtures/install-check/$MANAGER"
+
+          # Lock-file managers gain a dependency their committed lock
+          # does not describe. pip has no lock, so its pins are made
+          # unsatisfiable instead, which fails the install itself.
+          case "$MANAGER" in
+            pipenv)
+              file="Pipfile"
+              sed -i '/^iniconfig = /a toml = "==0.10.2"' "$file"
+              ;;
+            pip)
+              file="requirements.txt"
+              sed -i '/^iniconfig==2.1.0$/a iniconfig==2.0.0' "$file"
+              ;;
+            *)
+              file="pyproject.toml"
+              sed -i '/"iniconfig==2.1.0",/a "toml==0.10.2",' "$file"
+              ;;
+          esac
+
+          if git diff --quiet -- "$file"; then
+            echo "::error::Fixture change did not apply to $file"
+            exit 1
+          fi
+          git --no-pager diff -- "$file"
+
+      - name: "Inconsistent fixture, fail_on_error: true"
+        id: strict
+        uses: $/
+        continue-on-error: true
+        with:
+          path_prefix: "tests/fixtures/install-check/${{ matrix.manager }}"
+          output_directory: "strict"
+          fail_on_error: "true"
+
+      - name: "Inconsistent fixture, fail_on_error: false"
+        id: lenient
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/install-check/${{ matrix.manager }}"
+          output_directory: "lenient"
+          fail_on_error: "false"
+
+      - name: "Check outcomes"
+        shell: bash
+        env:
+          EXPECTED_MANAGER: ${{ matrix.expected_manager }}
+          CONTROL_MANAGER: ${{ steps.control.outputs.dependency_manager }}
+          STRICT_OUTCOME: ${{ steps.strict.outcome }}
+          LENIENT_JSON: ${{ steps.lenient.outputs.sbom_json_path }}
+        run: |
+          set -euo pipefail
+          status=0
+
+          if [[ "$CONTROL_MANAGER" != "$EXPECTED_MANAGER" ]]; then
+            echo "::error::Fixture detected as '$CONTROL_MANAGER'" \
+                 "instead of '$EXPECTED_MANAGER'"
+            status=1
+          fi
+
+          if [[ "$STRICT_OUTCOME" != "failure" ]]; then
+            echo "::error::fail_on_error 'true' gave '$STRICT_OUTCOME'" \
+                 "for an inconsistent fixture; expected 'failure'"
+            status=1
+          fi
+
+          if [[ -e "strict/sbom-cyclonedx.json" ]]; then
+            echo "::error::fail_on_error 'true' still wrote an SBOM"
+            status=1
+          fi
+
+          if [[ -z "$LENIENT_JSON" || ! -f "$LENIENT_JSON" ]]; then
+            echo "::error::fail_on_error 'false' did not write an SBOM"
+            status=1
+          fi
+
+          if [[ "$status" -eq 0 ]]; then
+            echo "✅ Inconsistent fixture fails strictly, warns leniently"
+          fi
+          exit "$status"
+
   test-summary:
     name: "Test Summary"
     runs-on: ubuntu-latest
