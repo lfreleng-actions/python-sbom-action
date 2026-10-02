@@ -42,7 +42,7 @@ inputs:
     default: "."
 
   fail_on_error:
-    description: "Fail the action if SBOM generation encounters errors"
+    description: "Fail on a stale lock, a failed install, or an SBOM error"
     required: false
     default: "true"
 
@@ -277,6 +277,52 @@ runs:
       env:
         STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
 
+    - name: "Verify lock file is current"
+      id: check_lock
+      shell: bash
+      working-directory: ${{ steps.project_dir.outputs.project_dir }}
+      # The SBOM is read from the installed environment, not the lock
+      # file. A lock that predates its manifest installs the previous
+      # dependency set, so the SBOM would omit whatever the change under
+      # review added. PDM's sync exits 0 in that state, so an explicit
+      # check is the only reliable signal across all managers.
+      run: |
+        set -euo pipefail
+
+        TOOL="${STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER}"
+        LOCK_FILE="${STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE}"
+
+        case "$TOOL" in
+          uv) check_cmd=(uv lock --check) ;;
+          pdm) check_cmd=(pdm lock --check) ;;
+          poetry) check_cmd=(poetry check --lock) ;;
+          pipenv) check_cmd=(pipenv verify) ;;
+          *)
+            echo "ℹ️ $TOOL has no lock consistency check, skipping"
+            exit 0
+            ;;
+        esac
+
+        echo "🔒 Checking $LOCK_FILE against its manifest..."
+        if "${check_cmd[@]}"; then
+          echo "✅ $LOCK_FILE is current"
+          exit 0
+        fi
+
+        message="'${check_cmd[*]}' failed: $LOCK_FILE does not match its"
+        message+=" manifest. Run '$TOOL lock' and commit the result; a stale"
+        message+=" lock installs the previous dependency set, so the SBOM"
+        message+=" would omit whatever was added since."
+        if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
+          echo "::error::$message"
+          exit 1
+        fi
+        echo "::warning::$message"
+      env:
+        STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
+        STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE: ${{ steps.detect_tool.outputs.lock_file }}
+        INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
+
     - name: "Install dependencies"
       id: install_deps
       shell: bash
@@ -289,61 +335,78 @@ runs:
 
         echo "📦 Installing dependencies with $TOOL..."
 
-        # Try to install dependencies, but don't fail if they have conflicts
+        # cyclonedx-py reports the installed environment, so a failed
+        # install yields an SBOM missing whatever did not install.
         case "$TOOL" in
           uv)
-            if [[ "$INCLUDE_DEV" == "true" ]]; then
-              uv sync --locked || echo "⚠️ UV sync failed, continuing with available packages"
-            else
-              uv sync --locked --no-dev || echo "⚠️ UV sync failed, continuing with available packages"
+            install_cmd=(uv sync --locked)
+            if [[ "$INCLUDE_DEV" != "true" ]]; then
+              install_cmd+=(--no-dev)
             fi
             ;;
 
           pdm)
-            if [[ "$INCLUDE_DEV" == "true" ]]; then
-              pdm sync --no-self || echo "⚠️ PDM sync failed, continuing with available packages"
-            else
-              pdm sync --prod --no-self || echo "⚠️ PDM sync failed, continuing with available packages"
+            install_cmd=(pdm sync --no-self)
+            if [[ "$INCLUDE_DEV" != "true" ]]; then
+              install_cmd+=(--prod)
             fi
             ;;
 
           poetry)
-            if [[ "$INCLUDE_DEV" == "true" ]]; then
-              poetry install --no-root || echo "⚠️ Poetry install failed, continuing with available packages"
-            else
-              poetry install --no-root --only=main || echo "⚠️ Poetry install failed, continuing with available packages"
+            install_cmd=(poetry install --no-root)
+            if [[ "$INCLUDE_DEV" != "true" ]]; then
+              install_cmd+=(--only=main)
             fi
             ;;
 
           pipenv)
+            # --deploy refuses a stale Pipfile.lock. There is deliberately
+            # no --skip-lock fallback: it would ignore the lock entirely.
+            install_cmd=(pipenv install --deploy)
             if [[ "$INCLUDE_DEV" == "true" ]]; then
-              pipenv install --dev --deploy || pipenv install --dev --skip-lock || echo "⚠️ Pipenv install failed, continuing with available packages"
-            else
-              pipenv install --deploy || pipenv install --skip-lock || echo "⚠️ Pipenv install failed, continuing with available packages"
+              install_cmd+=(--dev)
             fi
             ;;
 
           pip-tools|pip)
             # For pip/pip-tools, install from requirements.txt
             if [[ -f "requirements.txt" ]]; then
+              install_cmd=(python -m pip install -r requirements.txt)
               if [[ "$INCLUDE_DEV" == "true" ]] && [[ -f "requirements-dev.txt" ]]; then
-                python -m pip install -r requirements.txt -r requirements-dev.txt || echo "⚠️ Pip install failed, continuing with available packages"
-              else
-                python -m pip install -r requirements.txt || echo "⚠️ Pip install failed, continuing with available packages"
+                install_cmd+=(-r requirements-dev.txt)
               fi
             elif [[ -f "pyproject.toml" ]]; then
               # For pyproject.toml, cyclonedx-py can read it directly, so we don't need to install dependencies
               echo "📦 Using pyproject.toml directly (no dependency installation needed)"
+              exit 0
             else
               echo "⚠️ No requirements.txt or pyproject.toml found, skipping dependency installation"
+              exit 0
             fi
+            ;;
+
+          *)
+            echo "❌ Unsupported tool: $TOOL"
+            exit 1
             ;;
         esac
 
-        echo "✅ Dependencies installation completed (some may have failed)"
+        if "${install_cmd[@]}"; then
+          echo "✅ Dependencies installed"
+          exit 0
+        fi
+
+        message="Dependency installation with $TOOL failed; the SBOM"
+        message+=" would omit any dependency that did not install."
+        if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
+          echo "::error::$message"
+          exit 1
+        fi
+        echo "::warning::$message"
       env:
         STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
         INPUTS_INCLUDE_DEV: ${{ inputs.include_dev }}
+        INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
 
     - name: "Install CycloneDX BOM generator"
       shell: bash

@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The self-test inserts a conflicting pin after this one to make the
+# install fail; keep it on a line of its own.
+iniconfig==2.1.0
