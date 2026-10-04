@@ -105,16 +105,16 @@ steps:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name                | Required | Default          | Description                                |
-| ------------------- | -------- | ---------------- | ------------------------------------------ |
-| `python_version`    | No       | `3.12`           | Python version for SBOM generation         |
-| `include_dev`       | No       | `false`          | Include dev dependencies in SBOM           |
-| `sbom_format`       | No       | `both`           | SBOM format: 'json', 'xml', or 'both'      |
-| `sbom_spec_version` | No       | `1.5`            | CycloneDX specification version            |
-| `filename_prefix`   | No       | `sbom-cyclonedx` | Base filename for SBOM output              |
-| `path_prefix`       | No       | `.`              | Directory location containing project code |
-| `output_directory`  | No       | `.`              | Directory location to write SBOM reports   |
-| `fail_on_error`     | No       | `true`           | Fail action if SBOM generation fails       |
+| Name                | Required | Default          | Description                                         |
+| ------------------- | -------- | ---------------- | --------------------------------------------------- |
+| `python_version`    | No       | `3.12`           | Python version for SBOM generation                  |
+| `include_dev`       | No       | `false`          | Include dev dependencies in SBOM                    |
+| `sbom_format`       | No       | `both`           | SBOM format: 'json', 'xml', or 'both'               |
+| `sbom_spec_version` | No       | `1.5`            | CycloneDX specification version                     |
+| `filename_prefix`   | No       | `sbom-cyclonedx` | Base filename for SBOM output                       |
+| `path_prefix`       | No       | `.`              | Directory location containing project code          |
+| `output_directory`  | No       | `.`              | Directory location to write SBOM reports            |
+| `fail_on_error`     | No       | `true`           | Fail on a stale lock, failed install, or SBOM error |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -161,16 +161,30 @@ The action detects dependency management tools in the following priority order:
 
 <!-- markdownlint-disable MD013 -->
 
-| Tool      | Lock File          | Install Command                   | Dev Dependencies  |
-| --------- | ------------------ | --------------------------------- | ----------------- |
-| uv        | `uv.lock`          | `uv sync --locked [--no-dev]`     | Via `include_dev` |
-| PDM       | `pdm.lock`         | `pdm sync [--prod] --no-self`     | Via `include_dev` |
-| Poetry    | `poetry.lock`      | `poetry install --no-root`        | Via `include_dev` |
-| Pipenv    | `Pipfile.lock`     | `pipenv install --deploy`         | Via `include_dev` |
-| pip-tools | `requirements.txt` | `pip install -r requirements.txt` | Via dev           |
-| pip       | `requirements.txt` | `pip install -r requirements.txt` | Via dev           |
+| Tool      | Lock File          | Lock Check            | Install Command                   | Dev Dependencies  |
+| --------- | ------------------ | --------------------- | --------------------------------- | ----------------- |
+| uv        | `uv.lock`          | `uv lock --check`     | `uv sync --locked [--no-dev]`     | Via `include_dev` |
+| PDM       | `pdm.lock`         | `pdm lock --check`    | `pdm sync [--prod] --no-self`     | Via `include_dev` |
+| Poetry    | `poetry.lock`      | `poetry check --lock` | `poetry install --no-root`        | Via `include_dev` |
+| Pipenv    | `Pipfile.lock`     | `pipenv verify`       | `pipenv install --deploy`         | Via `include_dev` |
+| pip-tools | `requirements.txt` | None                  | `pip install -r requirements.txt` | Via dev           |
+| pip       | `requirements.txt` | None                  | `pip install -r requirements.txt` | Via dev           |
 
 <!-- markdownlint-enable MD013 -->
+
+### Lock Consistency and Install Failures
+
+The SBOM describes the packages installed in the environment, not the
+contents of the lock file. A lock file that predates a change to its
+manifest installs the previous dependency set, so the SBOM would omit any
+dependency the change added, and a vulnerability scan of that SBOM would
+never see it.
+
+The action checks the lock file against its manifest before installing,
+and checks the outcome of the install itself. With the default
+`fail_on_error: true`, a stale lock file or a failed install fails the
+action. With `fail_on_error: false`, the action reports each as a warning
+annotation and continues, producing an SBOM that may be incomplete.
 
 ## 📚 Usage Examples
 
@@ -458,11 +472,12 @@ jobs:
 
 1. **Detection**: Scans for supported dependency files in priority order
 2. **Tool Setup**: Installs the detected dependency management tool
-3. **Dependency Installation**: Installs dependencies according to lock files
-4. **SBOM Generation**: Uses CycloneDX Python library to generate SBOM from
+3. **Lock Verification**: Checks that the lock file matches its manifest
+4. **Dependency Installation**: Installs dependencies according to lock files
+5. **SBOM Generation**: Uses CycloneDX Python library to generate SBOM from
    environment
-5. **Validation**: Validates generated SBOM files for correctness
-6. **Outputs**: Provides paths and metadata about generated files
+6. **Validation**: Validates generated SBOM files for correctness
+7. **Outputs**: Provides paths and metadata about generated files
 
 ### CycloneDX Integration
 
@@ -491,6 +506,12 @@ dependency tree.
 
 - Verify the Python version is compatible with your dependency manager
 - Check if there are any conflicting system packages
+
+#### Lock file does not match its manifest
+
+The manifest (`pyproject.toml` or `Pipfile`) changed after the lock file
+was last generated. Run the lock command the error names, such as
+`uv lock`, and commit the updated lock file alongside the manifest change.
 
 #### SBOM generation fails
 
