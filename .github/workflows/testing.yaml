@@ -434,6 +434,8 @@ jobs:
             "$PINNED_JSON")"
           [[ ",$components," == *,iniconfig,* ]] || \
             fail "pinned fixture SBOM lacks iniconfig: $components"
+          [[ ",$components," != *,pluggy,* ]] || \
+            fail "include_dev 'false' still listed pluggy: uv run re-synced"
 
           [[ "$UNSATISFIABLE_OUTCOME" == "failure" ]] || \
             fail "unsatisfiable python_version gave '$UNSATISFIABLE_OUTCOME'"

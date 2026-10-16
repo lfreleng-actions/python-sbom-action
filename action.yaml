@@ -548,7 +548,9 @@ runs:
         # Determine the command prefix based on the tool
         case "$TOOL" in
           uv)
-            CMD_PREFIX="uv run"
+            # --no-sync: uv run otherwise syncs the default groups back
+            # in first, so include_dev 'false' would still list them
+            CMD_PREFIX="uv run --no-sync"
             ;;
           pdm)
             CMD_PREFIX="pdm run"
