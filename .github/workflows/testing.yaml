@@ -360,9 +360,10 @@ jobs:
   # python_version must decide the interpreter for uv projects too.
   # Unbound, uv resolves its own from requires-python and
   # .python-version, downloading the newest that fits, which then
-  # builds dependencies from source (python-sbom-action#151).
+  # builds dependencies from source (python-sbom-action#151). The
+  # scanner must also stay out of the environment it describes.
   test-uv-python-version:
-    name: "uv honours python_version"
+    name: "uv honours python_version and the locked set"
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -409,12 +410,24 @@ jobs:
           output_directory: "satisfying"
           python_version: "3.14"
 
+      # cyclonedx-bom needs packageurl-python 0.11 or later; this
+      # fixture locks 0.10.4. Installed into the project environment,
+      # the scanner would replace it and report its own version.
+      - name: "Scanner kept out of the project environment"
+        id: isolation
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/scanner-isolation/uv"
+          output_directory: "isolation"
+          sbom_format: "json"
+
       - name: "Check interpreters and outcomes"
         shell: bash
         env:
           PINNED_JSON: ${{ steps.pinned.outputs.sbom_json_path }}
           UNSATISFIABLE_OUTCOME: ${{ steps.unsatisfiable.outcome }}
           SATISFYING_JSON: ${{ steps.satisfying.outputs.sbom_json_path }}
+          ISOLATION_JSON: ${{ steps.isolation.outputs.sbom_json_path }}
         run: |
           set -euo pipefail
           status=0
@@ -435,7 +448,7 @@ jobs:
           [[ ",$components," == *,iniconfig,* ]] || \
             fail "pinned fixture SBOM lacks iniconfig: $components"
           [[ ",$components," != *,pluggy,* ]] || \
-            fail "include_dev 'false' still listed pluggy: uv run re-synced"
+            fail "include_dev 'false' still listed pluggy"
 
           [[ "$UNSATISFIABLE_OUTCOME" == "failure" ]] || \
             fail "unsatisfiable python_version gave '$UNSATISFIABLE_OUTCOME'"
@@ -447,6 +460,13 @@ jobs:
             fail "python_version 3.14 built on '$satisfying'"
           [[ -f "$SATISFYING_JSON" ]] || \
             fail "python_version 3.14 wrote no SBOM"
+
+          # The locked version, the default groups alone, and nothing of
+          # the scanner's own
+          isolation="$(jq -r '[.components[] | .name + "==" + .version]
+            | sort | join(",")' "$ISOLATION_JSON")"
+          [[ "$isolation" == "packageurl-python==0.10.4" ]] || \
+            fail "scanner isolation SBOM lists: $isolation"
 
           # uv must never have fetched an interpreter of its own
           managed="${UV_PYTHON_INSTALL_DIR:-$HOME/.local/share/uv/python}"
