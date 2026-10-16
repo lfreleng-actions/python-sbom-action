@@ -210,6 +210,7 @@ runs:
         INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
 
     - name: "Setup Python"
+      id: setup_python
       # yamllint disable rule:line-length
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
       with:
@@ -304,15 +305,30 @@ runs:
         esac
 
         echo "🔒 Checking $LOCK_FILE against its manifest..."
-        if "${check_cmd[@]}"; then
+        # The output is kept as well as shown: for uv, a failure here can
+        # mean the interpreter is wrong rather than the lock, and the two
+        # need different remedies
+        check_log="$(mktemp)"
+        if "${check_cmd[@]}" 2>&1 | tee "$check_log"; then
+          rm -f "$check_log"
           echo "✅ $LOCK_FILE is current"
           exit 0
         fi
 
-        message="'${check_cmd[*]}' failed: $LOCK_FILE does not match its"
-        message+=" manifest. Run '$TOOL lock' and commit the result; a stale"
-        message+=" lock installs the previous dependency set, so the SBOM"
-        message+=" would omit whatever was added since."
+        if [[ "$TOOL" == "uv" ]] && grep -q \
+          "incompatible with the project's Python requirement" "$check_log"
+        then
+          message="python_version '${INPUTS_PYTHON_VERSION}' does not satisfy"
+          message+=" the project's requires-python. uv is bound to that"
+          message+=" interpreter and never downloads another; set"
+          message+=" python_version to a version the project supports."
+        else
+          message="'${check_cmd[*]}' failed: $LOCK_FILE does not match its"
+          message+=" manifest. Run '$TOOL lock' and commit the result; a stale"
+          message+=" lock installs the previous dependency set, so the SBOM"
+          message+=" would omit whatever was added since."
+        fi
+        rm -f "$check_log"
         if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
           echo "::error::$message"
           exit 1
@@ -322,6 +338,14 @@ runs:
         STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
         STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE: ${{ steps.detect_tool.outputs.lock_file }}
         INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
+        INPUTS_PYTHON_VERSION: ${{ inputs.python_version }}
+        # uv otherwise resolves its own interpreter from requires-python
+        # and .python-version, downloading the newest that fits when none
+        # is installed: a release new enough to lack wheels, so the
+        # install compiles from source. Binding it to setup-python's
+        # interpreter, with downloads off, makes python_version decide.
+        UV_PYTHON: ${{ steps.setup_python.outputs.python-path }}
+        UV_PYTHON_DOWNLOADS: never
 
     - name: "Install dependencies"
       id: install_deps
@@ -407,6 +431,9 @@ runs:
         STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
         INPUTS_INCLUDE_DEV: ${{ inputs.include_dev }}
         INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
+        # See "Verify lock file is current"
+        UV_PYTHON: ${{ steps.setup_python.outputs.python-path }}
+        UV_PYTHON_DOWNLOADS: never
 
     - name: "Install CycloneDX BOM generator"
       shell: bash
@@ -421,7 +448,11 @@ runs:
         # Install cyclonedx-bom into the virtual environment without modifying project files
         case "$TOOL" in
           uv)
-            uv pip install --no-cache-dir cyclonedx-bom || {
+            # Into the project environment uv sync built, named outright:
+            # UV_PYTHON, which binds uv to setup-python's interpreter,
+            # would otherwise send this install there
+            uv pip install --no-cache-dir \
+              --python "${UV_PROJECT_ENVIRONMENT:-.venv}" cyclonedx-bom || {
               echo "❌ Failed to install cyclonedx-bom with uv"
               if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
                 exit 1
@@ -496,6 +527,9 @@ runs:
       env:
         STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
         INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
+        # See "Verify lock file is current"
+        UV_PYTHON: ${{ steps.setup_python.outputs.python-path }}
+        UV_PYTHON_DOWNLOADS: never
 
     - name: "Generate SBOM"
       id: generate_sbom
@@ -640,6 +674,9 @@ runs:
         STEPS_PROJECT_DIR_OUTPUTS_OUTPUT_DIR: ${{ steps.project_dir.outputs.output_dir }}
         STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE: ${{ steps.detect_tool.outputs.lock_file }}
         INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
+        # See "Verify lock file is current"
+        UV_PYTHON: ${{ steps.setup_python.outputs.python-path }}
+        UV_PYTHON_DOWNLOADS: never
 
     - name: "Validate SBOM files"
       shell: bash

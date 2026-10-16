@@ -131,6 +131,16 @@ and write the reports to another location.
 generate `my-app.json` and `my-app.xml` files. The action automatically
 appends the appropriate extensions based on the `sbom_format` setting.
 
+- **`python_version`**: This decides the interpreter for every dependency
+manager, uv included. uv runs bound to the interpreter `setup-python`
+installs (`UV_PYTHON`), with Python downloads disabled, so a project's
+`.python-version` or `requires-python` cannot make it fetch a different one.
+Left unbound, uv picks the newest Python a project allows, a release new
+enough to lack wheels, and compiles dependencies from source. Set
+`python_version` to a version that satisfies the project's
+`requires-python`: otherwise the action fails at once with a message saying
+so.
+
 ## 📤 Outputs
 
 <!-- markdownlint-disable MD013 -->
