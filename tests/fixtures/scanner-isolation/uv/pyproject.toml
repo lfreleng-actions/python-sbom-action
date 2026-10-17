@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Locks a packageurl-python that cyclonedx-bom, which needs 0.11 or
+# later, would replace if installed into this environment: the SBOM
+# must report the locked 0.10.4. pluggy is development only, so the
+# default include_dev 'false' must leave it out.
+[project]
+name = "scanner-isolation"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["packageurl-python==0.10.4"]
+
+[dependency-groups]
+dev = ["pluggy==1.6.0"]

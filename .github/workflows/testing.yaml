@@ -357,6 +357,128 @@ jobs:
           fi
           exit "$status"
 
+  # python_version must decide the interpreter for uv projects too.
+  # Unbound, uv resolves its own from requires-python and
+  # .python-version, downloading the newest that fits, which then
+  # builds dependencies from source (python-sbom-action#151). The
+  # scanner must also stay out of the environment it describes.
+  test-uv-python-version:
+    name: "uv honours python_version and the locked set"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout local Action"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # .python-version asks for 3.14; the default python_version (3.12)
+      # must build the environment regardless
+      - name: "Pinned .python-version, default python_version"
+        id: pinned
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/python-version/pinned"
+          output_directory: "pinned"
+
+      # requires-python excludes the default python_version. Bound to
+      # it, uv refuses at once; the step timeout fails the job if the
+      # action drifts back into downloading and building instead.
+      - name: "Unsatisfiable default python_version"
+        id: unsatisfiable
+        uses: $/
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          path_prefix: "tests/fixtures/python-version/requires"
+          output_directory: "unsatisfiable"
+
+      - name: "Satisfying python_version"
+        id: satisfying
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/python-version/requires"
+          output_directory: "satisfying"
+          python_version: "3.14"
+
+      # cyclonedx-bom needs packageurl-python 0.11 or later; this
+      # fixture locks 0.10.4. Installed into the project environment,
+      # the scanner would replace it and report its own version.
+      - name: "Scanner kept out of the project environment"
+        id: isolation
+        uses: $/
+        with:
+          path_prefix: "tests/fixtures/scanner-isolation/uv"
+          output_directory: "isolation"
+          sbom_format: "json"
+
+      - name: "Check interpreters and outcomes"
+        shell: bash
+        env:
+          PINNED_JSON: ${{ steps.pinned.outputs.sbom_json_path }}
+          UNSATISFIABLE_OUTCOME: ${{ steps.unsatisfiable.outcome }}
+          SATISFYING_JSON: ${{ steps.satisfying.outputs.sbom_json_path }}
+          ISOLATION_JSON: ${{ steps.isolation.outputs.sbom_json_path }}
+        run: |
+          set -euo pipefail
+          status=0
+          fail() {
+            echo "::error::$1"
+            status=1
+          }
+          interpreter() {
+            sed -n 's/^version_info = //p; s/^version = //p' \
+              "tests/fixtures/python-version/$1/.venv/pyvenv.cfg" | head -1
+          }
+
+          pinned="$(interpreter pinned)"
+          [[ "$pinned" == 3.12* ]] || \
+            fail "pinned fixture built on '$pinned', not python_version 3.12"
+          components="$(jq -r '[.components[].name] | sort | join(",")' \
+            "$PINNED_JSON")"
+          [[ ",$components," == *,iniconfig,* ]] || \
+            fail "pinned fixture SBOM lacks iniconfig: $components"
+          [[ ",$components," != *,pluggy,* ]] || \
+            fail "include_dev 'false' still listed pluggy"
+
+          [[ "$UNSATISFIABLE_OUTCOME" == "failure" ]] || \
+            fail "unsatisfiable python_version gave '$UNSATISFIABLE_OUTCOME'"
+          [[ ! -e "unsatisfiable/sbom-cyclonedx.json" ]] || \
+            fail "unsatisfiable python_version still wrote an SBOM"
+
+          satisfying="$(interpreter requires)"
+          [[ "$satisfying" == 3.14* ]] || \
+            fail "python_version 3.14 built on '$satisfying'"
+          [[ -f "$SATISFYING_JSON" ]] || \
+            fail "python_version 3.14 wrote no SBOM"
+
+          # The locked version, the default groups alone, and nothing of
+          # the scanner's own
+          isolation="$(jq -r '[.components[] | .name + "==" + .version]
+            | sort | join(",")' "$ISOLATION_JSON")"
+          [[ "$isolation" == "packageurl-python==0.10.4" ]] || \
+            fail "scanner isolation SBOM lists: $isolation"
+
+          # uv must never have fetched an interpreter of its own
+          managed="${UV_PYTHON_INSTALL_DIR:-$HOME/.local/share/uv/python}"
+          if compgen -G "$managed/cpython-*" > /dev/null; then
+            fail "uv downloaded a Python: $(ls "$managed")"
+          fi
+
+          if [[ "$status" -eq 0 ]]; then
+            echo "✅ uv used python_version and downloaded nothing"
+          fi
+          exit "$status"
+
   test-summary:
     name: "Test Summary"
     runs-on: ubuntu-latest

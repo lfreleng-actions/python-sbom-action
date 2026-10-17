@@ -131,6 +131,16 @@ and write the reports to another location.
 generate `my-app.json` and `my-app.xml` files. The action automatically
 appends the appropriate extensions based on the `sbom_format` setting.
 
+- **`python_version`**: setup-python installs this interpreter, and the action
+binds uv projects to it: uv runs with `UV_PYTHON` naming it and Python downloads
+disabled, so a project's `.python-version` or `requires-python` cannot make it
+fetch a different one. Left unbound, uv picks the newest Python a project
+allows, a release new enough to lack wheels, and compiles dependencies from
+source. Set `python_version` to a version that satisfies the project's
+`requires-python`: otherwise a uv project fails at once with a message saying
+so. PDM, Poetry and Pipenv still choose their own project environment, as
+before, from their configuration, a recorded interpreter or the `Pipfile`.
+
 ## 📤 Outputs
 
 <!-- markdownlint-disable MD013 -->

@@ -1,0 +1,40 @@
+version = 1
+revision = 5
+requires-python = ">=3.10"
+
+[[package]]
+name = "packageurl-python"
+version = "0.10.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/ee/1e22fde9f8210b1bad0ada2a629d0e0c145627f546f793f0e5237109fe86/packageurl-python-0.10.4.tar.gz", hash = "sha256:5c91334f942cd55d45eb0c67dd339a535ef90e25f05b9ec016ad188ed0ef9048", size = 34187, upload-time = "2022-10-17T07:35:13.816Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/1a/bbe90b213ed5f22bf09a59a633bd4a58b0034df819f1eedd432618f947bf/packageurl_python-0.10.4-py3-none-any.whl", hash = "sha256:bf8a1ffe755634776f6563904d792fb0aa13b377fc86115c36fe17f69b6e59db", size = 28137, upload-time = "2022-10-17T07:35:11.002Z" },
+]
+
+[[package]]
+name = "pluggy"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "scanner-isolation"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "packageurl-python" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pluggy" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "packageurl-python", specifier = "==0.10.4" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pluggy", specifier = "==1.6.0" }]
