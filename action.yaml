@@ -210,6 +210,7 @@ runs:
         INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
 
     - name: "Setup Python"
+      id: setup_python
       # yamllint disable rule:line-length
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
       with:
@@ -304,15 +305,30 @@ runs:
         esac
 
         echo "🔒 Checking $LOCK_FILE against its manifest..."
-        if "${check_cmd[@]}"; then
+        # The output is kept as well as shown: for uv, a failure here can
+        # mean the interpreter is wrong rather than the lock, and the two
+        # need different remedies
+        check_log="$(mktemp)"
+        if "${check_cmd[@]}" 2>&1 | tee "$check_log"; then
+          rm -f "$check_log"
           echo "✅ $LOCK_FILE is current"
           exit 0
         fi
 
-        message="'${check_cmd[*]}' failed: $LOCK_FILE does not match its"
-        message+=" manifest. Run '$TOOL lock' and commit the result; a stale"
-        message+=" lock installs the previous dependency set, so the SBOM"
-        message+=" would omit whatever was added since."
+        if [[ "$TOOL" == "uv" ]] && grep -q \
+          "incompatible with the project's Python requirement" "$check_log"
+        then
+          message="python_version '${INPUTS_PYTHON_VERSION}' does not satisfy"
+          message+=" the project's requires-python. uv is bound to that"
+          message+=" interpreter and never downloads another; set"
+          message+=" python_version to a version the project supports."
+        else
+          message="'${check_cmd[*]}' failed: $LOCK_FILE does not match its"
+          message+=" manifest. Run '$TOOL lock' and commit the result; a stale"
+          message+=" lock installs the previous dependency set, so the SBOM"
+          message+=" would omit whatever was added since."
+        fi
+        rm -f "$check_log"
         if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
           echo "::error::$message"
           exit 1
@@ -322,6 +338,14 @@ runs:
         STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
         STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE: ${{ steps.detect_tool.outputs.lock_file }}
         INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
+        INPUTS_PYTHON_VERSION: ${{ inputs.python_version }}
+        # uv otherwise resolves its own interpreter from requires-python
+        # and .python-version, downloading the newest that fits when none
+        # is installed: a release new enough to lack wheels, so the
+        # install compiles from source. Binding it to setup-python's
+        # interpreter, with downloads off, makes python_version decide.
+        UV_PYTHON: ${{ steps.setup_python.outputs.python-path }}
+        UV_PYTHON_DOWNLOADS: never
 
     - name: "Install dependencies"
       id: install_deps
@@ -407,94 +431,117 @@ runs:
         STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
         INPUTS_INCLUDE_DEV: ${{ inputs.include_dev }}
         INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
+        # See "Verify lock file is current"
+        UV_PYTHON: ${{ steps.setup_python.outputs.python-path }}
+        UV_PYTHON_DOWNLOADS: never
 
     - name: "Install CycloneDX BOM generator"
+      id: install_cyclonedx
       shell: bash
       working-directory: ${{ steps.project_dir.outputs.project_dir }}
+      # cyclonedx-bom installs into an environment of its own and scans
+      # the project's from outside. Installed into the project's, it can
+      # replace a version the project locks with one it needs itself, so
+      # the SBOM would report the scanner's version, and it lists its own
+      # dependency tree as though the project used it.
       run: |
         set -euo pipefail
 
         TOOL="${STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER}"
 
-        echo "🔧 Installing cyclonedx-bom..."
+        fail() {
+          echo "❌ $1"
+          if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
+            exit 1
+          fi
+          echo "::warning::$1; SBOM generation will fail"
+          exit 0
+        }
 
-        # Install cyclonedx-bom into the virtual environment without modifying project files
+        # A virtual environment's executable: Scripts\*.exe on Windows,
+        # bin/ elsewhere
+        venv_executable() {
+          if [[ -d "$1/Scripts" ]]; then
+            echo "$1/Scripts/$2.exe"
+          else
+            echo "$1/bin/$2"
+          fi
+        }
+        # The interpreter a manager runs the project with, asked of it
+        # rather than assumed: Poetry with virtualenvs.create false uses
+        # an existing interpreter, which 'poetry env info' then refuses
+        # to report
+        executable_of() {
+          "$@" python -c 'import sys; print(sys.executable)'
+        }
+
+        # The interpreter of the environment each manager installed the
+        # project's dependencies into
+        project_python=""
         case "$TOOL" in
           uv)
-            uv pip install --no-cache-dir cyclonedx-bom || {
-              echo "❌ Failed to install cyclonedx-bom with uv"
-              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
-                exit 1
-              else
-                echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
-                exit 0
-              fi
-            }
+            project_python="$(venv_executable \
+              "${UV_PROJECT_ENVIRONMENT:-.venv}" python)"
             ;;
-
           pdm)
-            pdm run pip install cyclonedx-bom || {
-              echo "❌ Failed to install cyclonedx-bom with pdm"
-              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
-                exit 1
-              else
-                echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
-                exit 0
-              fi
-            }
-            ;;
-
-          poetry)
-            poetry run pip install cyclonedx-bom || {
-              echo "❌ Failed to install cyclonedx-bom with poetry"
-              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
-                exit 1
-              else
-                echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
-                exit 0
-              fi
-            }
-            ;;
-
-          pipenv)
-            pipenv run pip install cyclonedx-bom || {
-              echo "❌ Failed to install cyclonedx-bom with pipenv"
-              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
-                exit 1
-              else
-                echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
-                exit 0
-              fi
-            }
-            ;;
-
-          pip-tools|pip)
-            # For pip/pip-tools, install globally as there's no virtual environment management
-            python -m pip install cyclonedx-bom || {
-              echo "❌ Failed to install cyclonedx-bom with pip"
-              if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
-                exit 1
-              else
-                echo "::warning::Cannot install cyclonedx-bom, SBOM generation will fail"
-                exit 0
-              fi
-            }
-            ;;
-
-          *)
-            echo "❌ Unsupported tool for cyclonedx-bom installation: $TOOL"
-            if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
-              exit 1
-            else
-              echo "::warning::Cannot install cyclonedx-bom for unsupported tool, SBOM generation will fail"
-              exit 0
+            # PEP 582 mode installs into __pypackages__ beside the base
+            # interpreter, which is no environment cyclonedx-py can scan
+            if [[ "$(pdm config python.use_venv | tr -d '\r')" == "False" ]]; then
+              message="PDM's PEP 582 mode (python.use_venv false) is not"
+              message+=" supported: set python.use_venv true"
+              fail "$message"
             fi
+            project_python="$(executable_of pdm run)" || project_python=""
             ;;
+          poetry)
+            project_python="$(executable_of poetry run)" ||
+              project_python=""
+            ;;
+          pipenv) project_python="$(pipenv --py)" || project_python="" ;;
+          pip-tools|pip) project_python="${STEPS_SETUP_PYTHON_PYTHON_PATH}" ;;
+          *) fail "Unsupported tool for SBOM generation: $TOOL" ;;
         esac
+        # Windows tools end their output with CRLF, and command
+        # substitution removes only the LF
+        project_python="${project_python%$'\r'}"
+        if [[ -z "$project_python" || ! -x "$project_python" ]]; then
+          fail "Cannot find the $TOOL environment's interpreter"
+        fi
+        # Absolute, but not resolved: a virtual environment's interpreter
+        # is a symlink to the base one, and following it would scan the
+        # base installation instead of the environment
+        case "$project_python" in
+          /*|[A-Za-z]:[\\/]*) ;;
+          *) project_python="$PWD/$project_python" ;;
+        esac
+        echo "📍 Project environment interpreter: $project_python"
 
-        echo "✅ cyclonedx-bom installed successfully with $TOOL"
+        # A fresh directory per invocation: a job may run this action
+        # more than once, on different python_version values. Isolated
+        # (-I) because this runs from the project directory, where a
+        # venv.py or pip.py would otherwise replace the module '-m' names.
+        echo "🔧 Installing cyclonedx-bom..."
+        scanner="$(mktemp -d "${RUNNER_TEMP}/python-sbom-action-cyclonedx.XXXXXX")"
+        if ! "${STEPS_SETUP_PYTHON_PYTHON_PATH}" -I -m venv "$scanner" ||
+          ! "$(venv_executable "$scanner" python)" -I -m pip install --quiet \
+            --disable-pip-version-check cyclonedx-bom; then
+          fail "Cannot install cyclonedx-bom"
+        fi
+        cyclonedx_py="$(venv_executable "$scanner" cyclonedx-py)"
+        echo "✅ cyclonedx-bom installed in its own environment"
+
+        _delim="ghadelim-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+        {
+          echo "cyclonedx_py<<${_delim}"
+          echo "$cyclonedx_py"
+          echo "${_delim}"
+          echo "project_python<<${_delim}"
+          echo "$project_python"
+          echo "${_delim}"
+        } >> "$GITHUB_OUTPUT"
       env:
         STEPS_DETECT_TOOL_OUTPUTS_DEPENDENCY_MANAGER: ${{ steps.detect_tool.outputs.dependency_manager }}
+        STEPS_SETUP_PYTHON_PYTHON_PATH: ${{ steps.setup_python.outputs.python-path }}
         INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
 
     - name: "Generate SBOM"
@@ -511,24 +558,23 @@ runs:
 
         echo "🏗️ Generating SBOM with CycloneDX..."
 
-        # Determine the command prefix based on the tool
-        case "$TOOL" in
-          uv)
-            CMD_PREFIX="uv run"
-            ;;
-          pdm)
-            CMD_PREFIX="pdm run"
-            ;;
-          poetry)
-            CMD_PREFIX="poetry run"
-            ;;
-          pipenv)
-            CMD_PREFIX="pipenv run"
-            ;;
-          pip-tools|pip)
-            CMD_PREFIX=""
-            ;;
-        esac
+        # cyclonedx-py runs from its own environment and scans the one
+        # the dependencies went into, named by its interpreter
+        CYCLONEDX_PY="${STEPS_INSTALL_CYCLONEDX_OUTPUTS_CYCLONEDX_PY}"
+        PROJECT_PYTHON="${STEPS_INSTALL_CYCLONEDX_OUTPUTS_PROJECT_PYTHON}"
+        if [[ -z "$CYCLONEDX_PY" || -z "$PROJECT_PYTHON" ]]; then
+          echo "❌ cyclonedx-bom or the project environment is missing"
+          if [[ "${INPUTS_FAIL_ON_ERROR}" == "true" ]]; then
+            exit 1
+          fi
+          echo "::warning::Skipping SBOM generation"
+          exit 0
+        fi
+        # Use --pyproject parameter if we have a pyproject.toml file
+        scan_args=()
+        if [[ "${STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE}" == "pyproject.toml" ]]; then
+          scan_args+=(--pyproject pyproject.toml)
+        fi
 
         # Determine output paths using absolute output directory
         OUTPUT_DIR="${STEPS_PROJECT_DIR_OUTPUTS_OUTPUT_DIR}"
@@ -543,19 +589,11 @@ runs:
         # Generate JSON SBOM
         if [[ "$FORMAT" == "json" ]] || [[ "$FORMAT" == "both" ]]; then
           echo "Generating JSON SBOM..."
-          # Use --pyproject parameter if we have a pyproject.toml file
-          if [[ "${STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE}" == "pyproject.toml" ]]; then
-            $CMD_PREFIX cyclonedx-py environment \
-              --pyproject pyproject.toml \
-              --of JSON \
-              -o "$JSON_OUTPUT_PATH" \
-              --sv "$SPEC_VERSION"
-          else
-            $CMD_PREFIX cyclonedx-py environment \
-              --of JSON \
-              -o "$JSON_OUTPUT_PATH" \
-              --sv "$SPEC_VERSION"
-          fi
+          "$CYCLONEDX_PY" environment "${scan_args[@]}" \
+            --of JSON \
+            -o "$JSON_OUTPUT_PATH" \
+            --sv "$SPEC_VERSION" \
+            "$PROJECT_PYTHON"
 
           if [[ -f "$JSON_OUTPUT_PATH" ]]; then
             {
@@ -575,19 +613,11 @@ runs:
         # Generate XML SBOM
         if [[ "$FORMAT" == "xml" ]] || [[ "$FORMAT" == "both" ]]; then
           echo "Generating XML SBOM..."
-          # Use --pyproject parameter if we have a pyproject.toml file
-          if [[ "${STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE}" == "pyproject.toml" ]]; then
-            $CMD_PREFIX cyclonedx-py environment \
-              --pyproject pyproject.toml \
-              --of XML \
-              -o "$XML_OUTPUT_PATH" \
-              --sv "$SPEC_VERSION"
-          else
-            $CMD_PREFIX cyclonedx-py environment \
-              --of XML \
-              -o "$XML_OUTPUT_PATH" \
-              --sv "$SPEC_VERSION"
-          fi
+          "$CYCLONEDX_PY" environment "${scan_args[@]}" \
+            --of XML \
+            -o "$XML_OUTPUT_PATH" \
+            --sv "$SPEC_VERSION" \
+            "$PROJECT_PYTHON"
 
           if [[ -f "$XML_OUTPUT_PATH" ]]; then
             {
@@ -640,6 +670,10 @@ runs:
         STEPS_PROJECT_DIR_OUTPUTS_OUTPUT_DIR: ${{ steps.project_dir.outputs.output_dir }}
         STEPS_DETECT_TOOL_OUTPUTS_LOCK_FILE: ${{ steps.detect_tool.outputs.lock_file }}
         INPUTS_FAIL_ON_ERROR: ${{ inputs.fail_on_error }}
+        # yamllint disable-line rule:line-length
+        STEPS_INSTALL_CYCLONEDX_OUTPUTS_CYCLONEDX_PY: ${{ steps.install_cyclonedx.outputs.cyclonedx_py }}
+        # yamllint disable-line rule:line-length
+        STEPS_INSTALL_CYCLONEDX_OUTPUTS_PROJECT_PYTHON: ${{ steps.install_cyclonedx.outputs.project_python }}
 
     - name: "Validate SBOM files"
       shell: bash

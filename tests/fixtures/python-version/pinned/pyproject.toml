@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# .python-version asks uv for 3.14; the action must still build the
+# environment on python_version, never download, and leave pluggy
+# (development only) out at include_dev false.
+[project]
+name = "python-version-pinned"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["iniconfig==2.1.0"]
+
+[dependency-groups]
+dev = ["pluggy==1.6.0"]
