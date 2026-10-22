@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 name: "Python SBOM Generator"
-description: "Generates CycloneDX SBOM reports for Python projects"
+description: "Deprecated: use lfreleng-actions/sbom-action (python backend)"
 
 branding:
   icon: "package"
@@ -66,6 +66,17 @@ outputs:
 runs:
   using: "composite"
   steps:
+    - name: "Deprecation notice"
+      shell: bash
+      env:
+        # yamllint disable-line rule:line-length
+        MIGRATION_GUIDE: "https://github.com/lfreleng-actions/sbom-action#migrating-from-python-sbom-action"
+      run: |
+        # Surfaces in the caller's run summary as an annotation
+        echo "::warning title=python-sbom-action is deprecated::Use the" \
+          "'python' backend of lfreleng-actions/sbom-action instead." \
+          "See ${MIGRATION_GUIDE}"
+
     - name: "Validate and set project directory"
       id: project_dir
       shell: bash
