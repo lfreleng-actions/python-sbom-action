@@ -5,11 +5,41 @@
 
 # 🐍📋 Python SBOM Generator Action
 
+> [!WARNING]
+> **Deprecated.** This action receives no further updates, and we will
+> archive the repository. Use the `python` backend of
+> [sbom-action](https://github.com/lfreleng-actions/sbom-action), which
+> replaces it and supports other language ecosystems too. See
+> [Migrating to sbom-action](#migrating-to-sbom-action).
+
 A comprehensive GitHub Action that generates CycloneDX Software Bill of
 Materials (SBOM) reports for Python projects with automatic detection and
 support for different Python dependency management tools.
 
 ## python-sbom-action
+
+## Migrating to sbom-action
+
+sbom-action's `python` backend keeps every input and output this action
+offers, with the same names, meanings and defaults. Change the `uses:`
+line and add `backend: python`:
+
+```yaml
+- name: "Generate SBOM"
+  id: sbom
+  uses: lfreleng-actions/sbom-action@<sha>  # v0.7.0 or later
+  with:
+    backend: python
+```
+
+Some behaviours differ, notably fork pull requests skipping by default
+(`untrusted_checkout`) and lower component counts. The sbom-action
+[migration guide](https://github.com/lfreleng-actions/sbom-action#migrating-from-python-sbom-action)
+lists every difference.
+
+The reusable workflows in
+[python-workflows](https://github.com/lfreleng-actions/python-workflows)
+use sbom-action from v0.5.3 onwards.
 
 ## 🚀 Features
 
